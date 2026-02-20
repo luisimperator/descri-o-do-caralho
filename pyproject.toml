@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "descricao-arbitragem"
+version = "0.1.0"
+description = "Automação de descrições para vídeos do YouTube"
+requires-python = ">=3.11"
+dependencies = [
+    "yt-dlp>=2024.1.0",
+    "flask>=3.0",
+]
+
+[project.scripts]
+descricao-arbitragem = "src.main:main"
+descricao-arbitragem-web = "src.web:run_web"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
