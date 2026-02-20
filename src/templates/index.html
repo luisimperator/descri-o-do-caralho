@@ -135,11 +135,14 @@ function pollStatus() {
   if (!currentJobId) return;
 
   fetch('/api/status/' + currentJobId)
-  .then(r => r.json())
+  .then(r => {
+    if (!r.ok) throw new Error('Status ' + r.status);
+    return r.json();
+  })
   .then(data => {
     if (data.status === 'running') {
-      document.getElementById('statusText').textContent = 'Processando vídeo... isso pode levar alguns segundos';
-      pollTimer = setTimeout(pollStatus, 2000);
+      document.getElementById('statusText').textContent = 'Processando vídeo... isso pode levar alguns minutos';
+      pollTimer = setTimeout(pollStatus, 2500);
     } else if (data.status === 'done') {
       hideEl('statusBar');
       showResult(data.result);
@@ -148,6 +151,9 @@ function pollStatus() {
       hideEl('statusBar');
       showError(data.error || 'Erro desconhecido');
       resetBtn();
+    } else {
+      // Unexpected response — keep polling
+      pollTimer = setTimeout(pollStatus, 3000);
     }
   })
   .catch(() => {
