@@ -54,6 +54,18 @@ Se instalado via `pip install -e .`:
 descricao-arbitragem https://www.youtube.com/watch?v=VIDEO_ID
 ```
 
+### Interface Web
+
+```bash
+# Iniciar o servidor web (padrão: http://localhost:5000)
+descricao-arbitragem-web
+
+# Ou diretamente via módulo
+python -m flask --app src.web run
+```
+
+Abra o navegador em `http://localhost:5000`, cole a URL do vídeo e clique em **Gerar**.
+
 ## Pipeline
 
 1. **Extração de dados** — yt-dlp extrai metadados, thumbnail e transcrição (manual ou ASR)
@@ -97,6 +109,9 @@ src/
   __init__.py
   __main__.py       # Entry point para python -m src
   main.py           # CLI e orquestração do pipeline
+  web.py            # Interface web (Flask)
+  templates/
+    index.html      # Frontend da interface web
   extractor.py      # Extração de dados via yt-dlp
   ocr.py            # OCR com Tesseract
   names.py          # Extração, validação e canonização de nomes

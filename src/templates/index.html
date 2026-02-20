@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Descrição Arbitragem</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0f0f0f;--surface:#1a1a1a;--surface2:#262626;--border:#333;--text:#e8e8e8;--text2:#aaa;--accent:#ff4444;--accent-hover:#ff6666;--green:#4caf50}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column;align-items:center}
+header{width:100%;padding:1.5rem 2rem;border-bottom:1px solid var(--border);text-align:center}
+header h1{font-size:1.4rem;font-weight:600;letter-spacing:.5px}
+header p{color:var(--text2);font-size:.85rem;margin-top:.3rem}
+main{width:100%;max-width:800px;padding:2rem 1.5rem;flex:1}
+.input-group{display:flex;gap:.75rem;margin-bottom:1.5rem}
+.input-group input{flex:1;padding:.75rem 1rem;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:.95rem;outline:none;transition:border-color .2s}
+.input-group input:focus{border-color:var(--accent)}
+.input-group input::placeholder{color:var(--text2)}
+button{padding:.75rem 1.5rem;border:none;border-radius:8px;font-size:.95rem;font-weight:500;cursor:pointer;transition:background .2s,opacity .2s}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-copy{background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:.5rem 1rem;font-size:.8rem}
+.btn-copy:hover{background:var(--border)}
+.status{padding:1rem;border-radius:8px;background:var(--surface);border:1px solid var(--border);margin-bottom:1.5rem;display:none;align-items:center;gap:.75rem}
+.status.visible{display:flex}
+.spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status-text{font-size:.9rem;color:var(--text2)}
+.result-box{display:none}
+.result-box.visible{display:block}
+.result-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:.75rem}
+.result-header h2{font-size:1rem;font-weight:500}
+.result-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.5rem;margin-bottom:1rem}
+.meta-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.6rem .8rem}
+.meta-card .label{font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.meta-card .value{font-size:.9rem;margin-top:.15rem}
+.description-output{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.25rem;white-space:pre-wrap;font-family:'Courier New',monospace;font-size:.85rem;line-height:1.6;max-height:600px;overflow-y:auto;color:var(--text)}
+.tabs{display:flex;gap:0;margin-bottom:1rem;border-bottom:1px solid var(--border)}
+.tab{padding:.6rem 1.2rem;font-size:.85rem;background:none;border:none;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.error-msg{background:#2a1515;border:1px solid #5c2020;color:#ff8888;padding:1rem;border-radius:8px;margin-bottom:1rem;display:none;font-size:.9rem}
+.error-msg.visible{display:block}
+.keywords{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem}
+.keyword{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:.2rem .5rem;font-size:.75rem;color:var(--text2)}
+footer{padding:1rem;text-align:center;color:var(--text2);font-size:.75rem;border-top:1px solid var(--border);width:100%}
+</style>
+</head>
+<body>
+<header>
+  <h1>Descrição Arbitragem</h1>
+  <p>Gera descrições estruturadas para vídeos do YouTube automaticamente</p>
+</header>
+<main>
+  <div class="input-group">
+    <input type="text" id="urlInput" placeholder="Cole a URL do vídeo do YouTube aqui..." autofocus>
+    <button class="btn-primary" id="generateBtn" onclick="startGeneration()">Gerar</button>
+  </div>
+
+  <div class="error-msg" id="errorMsg"></div>
+
+  <div class="status" id="statusBar">
+    <div class="spinner" id="spinner"></div>
+    <span class="status-text" id="statusText">Processando...</span>
+  </div>
+
+  <div class="result-box" id="resultBox">
+    <div class="result-meta" id="resultMeta"></div>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('desc')">Descrição</button>
+      <button class="tab" onclick="switchTab('json')">JSON</button>
+    </div>
+
+    <div class="tab-content active" id="tab-desc">
+      <div class="result-header">
+        <h2>Descrição Gerada</h2>
+        <button class="btn-copy" onclick="copyText('descOutput')">Copiar</button>
+      </div>
+      <div class="description-output" id="descOutput"></div>
+    </div>
+
+    <div class="tab-content" id="tab-json">
+      <div class="result-header">
+        <h2>Dados Completos (JSON)</h2>
+        <button class="btn-copy" onclick="copyText('jsonOutput')">Copiar</button>
+      </div>
+      <div class="description-output" id="jsonOutput"></div>
+    </div>
+  </div>
+</main>
+<footer>Descrição Arbitragem &mdash; Automação de descrições para YouTube</footer>
+
+<script>
+let currentJobId = null;
+let pollTimer = null;
+
+function startGeneration() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+
+  const btn = document.getElementById('generateBtn');
+  btn.disabled = true;
+  btn.textContent = 'Gerando...';
+
+  hideEl('errorMsg');
+  hideEl('resultBox');
+  showEl('statusBar');
+  document.getElementById('statusText').textContent = 'Iniciando pipeline...';
+
+  fetch('/api/generate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url})
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      showError(data.error);
+      resetBtn();
+      return;
+    }
+    currentJobId = data.job_id;
+    pollStatus();
+  })
+  .catch(err => {
+    showError('Falha na conexão: ' + err.message);
+    resetBtn();
+  });
+}
+
+function pollStatus() {
+  if (!currentJobId) return;
+
+  fetch('/api/status/' + currentJobId)
+  .then(r => r.json())
+  .then(data => {
+    if (data.status === 'running') {
+      document.getElementById('statusText').textContent = 'Processando vídeo... isso pode levar alguns segundos';
+      pollTimer = setTimeout(pollStatus, 2000);
+    } else if (data.status === 'done') {
+      hideEl('statusBar');
+      showResult(data.result);
+      resetBtn();
+    } else if (data.status === 'error') {
+      hideEl('statusBar');
+      showError(data.error || 'Erro desconhecido');
+      resetBtn();
+    }
+  })
+  .catch(() => {
+    pollTimer = setTimeout(pollStatus, 3000);
+  });
+}
+
+function showResult(result) {
+  // Meta cards
+  const meta = document.getElementById('resultMeta');
+  meta.innerHTML = '';
+  const cards = [
+    {label: 'Canal', value: result.channel || '—'},
+    {label: 'Duração', value: formatDuration(result.duration)},
+    {label: 'Participantes', value: (result.participants || []).map(p => p.name).join(', ') || '—'},
+    {label: 'Palavras-chave', value: (result.keywords || []).length + ' termos'},
+  ];
+  cards.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'meta-card';
+    div.innerHTML = '<div class="label">' + c.label + '</div><div class="value">' + escapeHtml(c.value) + '</div>';
+    meta.appendChild(div);
+  });
+
+  document.getElementById('descOutput').textContent = result.description || '';
+  document.getElementById('jsonOutput').textContent = JSON.stringify(result, null, 2);
+  showEl('resultBox');
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  if (tab === 'desc') {
+    document.querySelectorAll('.tab')[0].classList.add('active');
+    document.getElementById('tab-desc').classList.add('active');
+  } else {
+    document.querySelectorAll('.tab')[1].classList.add('active');
+    document.getElementById('tab-json').classList.add('active');
+  }
+}
+
+function copyText(elId) {
+  const text = document.getElementById(elId).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('#' + elId).closest('.tab-content').querySelector('.btn-copy');
+    const orig = btn.textContent;
+    btn.textContent = 'Copiado!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+function showError(msg) {
+  const el = document.getElementById('errorMsg');
+  el.textContent = msg;
+  el.classList.add('visible');
+  hideEl('statusBar');
+}
+
+function showEl(id) { document.getElementById(id).classList.add('visible'); }
+function hideEl(id) { document.getElementById(id).classList.remove('visible'); }
+
+function resetBtn() {
+  const btn = document.getElementById('generateBtn');
+  btn.disabled = false;
+  btn.textContent = 'Gerar';
+}
+
+function formatDuration(sec) {
+  if (!sec) return '—';
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function escapeHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+document.getElementById('urlInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') startGeneration();
+});
+</script>
+</body>
+</html>
