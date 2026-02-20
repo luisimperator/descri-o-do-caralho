@@ -53,8 +53,11 @@ def _run_job(job_id: str, url: str) -> None:
         _jobs[job_id] = {"status": "error", "result": None, "error": str(exc)}
 
 
-def run_web(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
+def run_web(host: str = "0.0.0.0", port: int = 0, debug: bool = False):
     """Entry point for the web server."""
+    import os
+    if not port:
+        port = int(os.environ.get("PORT", 5000))
     app.run(host=host, port=port, debug=debug)
 
 

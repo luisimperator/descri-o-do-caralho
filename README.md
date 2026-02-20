@@ -66,6 +66,14 @@ python -m flask --app src.web run
 
 Abra o navegador em `http://localhost:5000`, cole a URL do vídeo e clique em **Gerar**.
 
+### Deploy no Railway
+
+1. Acesse [railway.app](https://railway.app) e faça login com GitHub
+2. Clique em **New Project** → **Deploy from GitHub repo**
+3. Selecione o repositório `descri-o-do-caralho`
+4. O Railway detecta o `Dockerfile` automaticamente — só esperar o build
+5. Acesse a URL gerada pelo Railway
+
 ## Pipeline
 
 1. **Extração de dados** — yt-dlp extrai metadados, thumbnail e transcrição (manual ou ASR)
