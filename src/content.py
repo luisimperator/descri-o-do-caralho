@@ -1,4 +1,4 @@
-"""Content generation: summaries, chapters, keywords."""
+"""Content generation: summaries, chapters, keywords, topics, social links."""
 
 import re
 from collections import Counter
@@ -11,23 +11,15 @@ def generate_summary(
     participant_names: list[str],
     max_words: int = 150,
 ) -> str:
-    """Generate a concise summary (max 150 words) of the video content.
-
-    Focuses on the central theme and key insights extracted from
-    the transcript and metadata.
-    """
-    # Combine available text sources
+    """Generate a concise summary (max 150 words) of the video content."""
     source_text = f"{title}. {description}. {transcript}"
 
-    # Extract key sentences (simple extractive approach)
     sentences = _split_sentences(source_text)
     if not sentences:
         return f"Neste episódio, {', '.join(participant_names) or 'os participantes'} discutem {title}."
 
-    # Score sentences by relevance
     scored = _score_sentences(sentences, title, participant_names)
 
-    # Build summary within word limit
     summary_parts: list[str] = []
     word_count = 0
     for sentence, _ in scored:
@@ -43,28 +35,59 @@ def generate_summary(
     return " ".join(summary_parts)
 
 
+def generate_topics(
+    title: str,
+    description: str,
+    transcript: str,
+    keywords: list[str],
+    max_topics: int = 6,
+) -> list[str]:
+    """Extract main discussion topics from the video content.
+
+    Returns a list of topic strings (not timestamped).
+    """
+    topics: list[str] = []
+
+    # Extract from title parts (split by separators)
+    for sep in ["|", " - ", ":", "–"]:
+        if sep in title:
+            parts = [p.strip() for p in title.split(sep) if len(p.strip()) > 3]
+            for p in parts:
+                if p not in topics and len(topics) < max_topics:
+                    topics.append(p)
+
+    # Extract from transcript hints
+    hints = _extract_topic_hints(transcript)
+    for h in hints:
+        if h not in topics and len(topics) < max_topics:
+            topics.append(h)
+
+    # Fill from keywords if needed (capitalize and group pairs)
+    if len(topics) < 3:
+        for kw in keywords:
+            topic = kw.capitalize()
+            if topic not in topics and len(topics) < max_topics:
+                topics.append(topic)
+
+    return topics[:max_topics]
+
+
 def generate_chapters(
     existing_chapters: list[dict],
     transcript: str,
     duration: int,
     max_chapters: int = 25,
 ) -> list[dict]:
-    """Return a list of chapters with start times and titles.
-
-    Uses existing chapters from metadata if available.
-    Otherwise, segments the video at ~4-minute intervals.
-    """
+    """Return a list of chapters with start times and titles."""
     if existing_chapters:
         return existing_chapters[:max_chapters]
 
     if duration <= 0:
         return [{"start": 0, "title": "Introdução"}]
 
-    # Auto-segment at ~4-minute intervals
-    interval = 240  # 4 minutes in seconds
+    interval = 240  # 4 minutes
     chapters = [{"start": 0, "title": "Introdução"}]
 
-    # Try to extract topic hints from transcript
     topic_hints = _extract_topic_hints(transcript)
 
     current = interval
@@ -100,15 +123,12 @@ def generate_keywords(
     max_keywords: int = 15,
 ) -> list[str]:
     """Combine terms from transcript, OCR, and metadata into a keyword list."""
-    # Collect all text
     all_text = f"{title} {description} {transcript} {ocr_text}"
     all_text_lower = all_text.lower()
 
-    # Tokenize and count
     words = re.findall(r"\b[a-záàâãéèêíïóôõúüç]{4,}\b", all_text_lower)
     counter = Counter(words)
 
-    # Remove common Portuguese stop words
     stop_words = {
         "para", "como", "mais", "está", "isso", "esse", "essa", "esses",
         "essas", "aqui", "aquele", "aquela", "então", "porque", "quando",
@@ -126,24 +146,51 @@ def generate_keywords(
     for sw in stop_words:
         counter.pop(sw, None)
 
-    # Boost OCR terms
     ocr_words = re.findall(r"\b[a-záàâãéèêíïóôõúüç]{4,}\b", ocr_text.lower())
     for w in ocr_words:
         if w in counter:
             counter[w] += 5
 
-    # Boost title terms
     title_words = re.findall(r"\b[a-záàâãéèêíïóôõúüç]{4,}\b", title.lower())
     for w in title_words:
         if w in counter:
             counter[w] += 10
 
-    # Get top keywords
     top = [word for word, _ in counter.most_common(max_keywords + 5)]
-
-    # Add channel name
     result = list(dict.fromkeys(top[:max_keywords]))
     return result
+
+
+def extract_social_links(description: str) -> dict:
+    """Extract social media handles/URLs from the video description.
+
+    Returns a dict with keys like 'instagram', 'twitter', 'facebook'.
+    """
+    if not description:
+        return {}
+
+    links: dict[str, str] = {}
+
+    # Instagram — try URL first, then "Instagram: @handle"
+    ig = re.search(r"instagram\.com/([a-zA-Z0-9_.]+)", description, re.IGNORECASE)
+    if not ig:
+        ig = re.search(r"instagram:\s*@([a-zA-Z0-9_.]+)", description, re.IGNORECASE)
+    if ig:
+        links["instagram"] = f"@{ig.group(1)}"
+
+    # Twitter / X — try URL first, then "Twitter: @handle"
+    tw = re.search(r"(?:twitter|x)\.com/([a-zA-Z0-9_]+)", description, re.IGNORECASE)
+    if not tw:
+        tw = re.search(r"twitter:\s*@([a-zA-Z0-9_]+)", description, re.IGNORECASE)
+    if tw:
+        links["twitter"] = f"@{tw.group(1)}"
+
+    # Facebook
+    fb = re.search(r"facebook\.com/([a-zA-Z0-9.]+)", description, re.IGNORECASE)
+    if fb:
+        links["facebook"] = fb.group(1)
+
+    return links
 
 
 # ---------------------------------------------------------------------------
@@ -170,19 +217,15 @@ def _score_sentences(
         score = 0.0
         words = set(sent.lower().split())
 
-        # Title word overlap
         overlap = len(words & title_words)
         score += overlap * 2.0
 
-        # Name mention
         for n in name_words:
             if n in sent.lower():
                 score += 3.0
 
-        # Prefer earlier sentences slightly
         score -= i * 0.1
 
-        # Prefer medium-length sentences
         wc = len(sent.split())
         if 10 <= wc <= 30:
             score += 1.0
@@ -198,7 +241,6 @@ def _extract_topic_hints(transcript: str, max_hints: int = 20) -> list[str]:
     if not transcript:
         return []
 
-    # Look for phrases that often introduce topics
     patterns = [
         r"(?:vamos falar|vamos conversar) (?:sobre|de) ([^,.!?]{5,40})",
         r"(?:o tema|o assunto|o tópico) (?:é|de hoje é) ([^,.!?]{5,40})",

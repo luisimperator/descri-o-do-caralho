@@ -5,6 +5,8 @@ from src.content import (
     generate_chapters,
     generate_keywords,
     generate_summary,
+    generate_topics,
+    extract_social_links,
 )
 
 
@@ -70,3 +72,47 @@ def test_generate_summary_with_content():
         max_words=50,
     )
     assert len(summary.split()) <= 55  # allow small margin
+
+
+def test_generate_topics_from_title():
+    topics = generate_topics(
+        title="Podcast | Economia | Mercado",
+        description="",
+        transcript="",
+        keywords=["investimento", "bolsa"],
+    )
+    assert len(topics) >= 2
+    assert any("Economia" in t for t in topics)
+
+
+def test_generate_topics_fills_from_keywords():
+    topics = generate_topics(
+        title="Podcast Simples",
+        description="",
+        transcript="",
+        keywords=["economia", "mercado", "investimento"],
+    )
+    assert len(topics) >= 3
+
+
+def test_extract_social_links_instagram():
+    desc = "Siga no Instagram: instagram.com/meucanal"
+    links = extract_social_links(desc)
+    assert links.get("instagram") == "@meucanal"
+
+
+def test_extract_social_links_twitter():
+    desc = "Twitter: twitter.com/meutwitter"
+    links = extract_social_links(desc)
+    assert links.get("twitter") == "@meutwitter"
+
+
+def test_extract_social_links_empty():
+    links = extract_social_links("")
+    assert links == {}
+
+
+def test_extract_social_links_facebook():
+    desc = "Facebook: facebook.com/meupodcast"
+    links = extract_social_links(desc)
+    assert links.get("facebook") == "meupodcast"

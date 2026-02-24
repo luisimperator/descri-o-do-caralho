@@ -14,6 +14,8 @@ class ValidatedName:
     source: str  # e.g. "ocr", "title", "google", "transcript"
     trust_level: str  # "high" | "medium" | "low"
     mini_bio: str = ""
+    role: str = ""  # e.g. "Economista", "Empresário"
+    present_in_video: bool = True  # True = participant, False = just cited
 
 
 def collect_name_candidates(
@@ -55,7 +57,7 @@ def validate_and_canonise(
       1. Present in title or description
       2. Complete OCR match
       3. Canonised via web search (Google)
-      4. Repeated >= 2× in transcript
+      4. Repeated >= 2x in transcript
     """
     validated: list[ValidatedName] = []
 
@@ -65,12 +67,15 @@ def validate_and_canonise(
         source = "extraction"
         trust = "low"
 
+        in_title = _fuzzy_in(name, video_title)
+        in_ocr = _fuzzy_in(name, ocr_full)
+
         # Criterion 1: present in title
-        if _fuzzy_in(name, video_title):
+        if in_title:
             criteria_met += 1
 
         # Criterion 2: complete OCR match
-        if _fuzzy_in(name, ocr_full):
+        if in_ocr:
             criteria_met += 1
             best_spelling = _pick_ocr_spelling(name, ocr_full) or best_spelling
             source = "ocr"
@@ -84,34 +89,40 @@ def validate_and_canonise(
             source = "google"
 
         # Criterion 4 is already handled by the collection phase (>= 2 repeats)
-        # If the name survived collection from transcript, count it.
-        # We assume collect_name_candidates already filtered for this.
         # Give an extra criterion point by default for reaching this stage.
         criteria_met += 1  # baseline: survived extraction
 
         if criteria_met >= 2:
+            # Determine if person is actually PRESENT in the video
+            # vs just being cited/discussed
+            present = in_title or in_ocr
             validated.append(
                 ValidatedName(
                     canonical=best_spelling,
                     source=source,
                     trust_level=trust if trust != "low" else "medium",
+                    present_in_video=present,
                 )
             )
 
     return validated
 
 
-def generate_mini_bio(name: str, channel_name: str) -> str:
+def generate_mini_bio(name: str, channel_name: str) -> tuple[str, str]:
     """Create an 8-12 word mini-biography via web search snippets.
 
-    Falls back to 'Profissional' on ambiguity.
+    Returns (role, bio). Falls back to defaults on ambiguity.
     """
     snippet = _search_snippet(f"{name} {channel_name}")
     if not snippet:
-        return "Profissional e participante do programa"
+        return "", "Participante do programa"
 
+    role = _extract_role(snippet)
     bio = _summarise_snippet(snippet, max_words=12)
-    return bio or "Profissional e participante do programa"
+    if not bio:
+        bio = "Participante do programa"
+
+    return role, bio
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +130,30 @@ def generate_mini_bio(name: str, channel_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 _NAME_PATTERN = re.compile(r"\b(?:[A-ZÀ-Ü][a-zà-ü]+(?:\s+|$)){2,5}")
+
+_ROLE_KEYWORDS = [
+    "economista", "empresário", "empresária", "jornalista", "médico", "médica",
+    "advogado", "advogada", "professor", "professora", "atleta",
+    "influenciador", "influenciadora", "apresentador", "apresentadora",
+    "comediante", "escritor", "escritora", "analista", "trader",
+    "investidor", "investidora", "político", "política", "engenheiro",
+    "engenheira", "cientista", "pesquisador", "pesquisadora", "youtuber",
+    "streamer", "fundador", "fundadora", "consultor", "consultora",
+    "CEO", "diretor", "diretora", "produtor", "produtora", "músico",
+    "música", "ator", "atriz", "cantor", "cantora", "filósofo", "filósofa",
+    "psicólogo", "psicóloga", "historiador", "historiadora",
+    "sociólogo", "socióloga", "criador de conteúdo", "criadora de conteúdo",
+    "coach", "mentor", "mentora", "podcaster",
+]
+
+
+def _extract_role(text: str) -> str:
+    """Extract a professional role from text."""
+    text_lower = text.lower()
+    for role in _ROLE_KEYWORDS:
+        if role.lower() in text_lower:
+            return role.capitalize()
+    return ""
 
 
 def _extract_capitalised_sequences(text: str) -> list[str]:
@@ -156,17 +191,12 @@ def _pick_ocr_spelling(name: str, ocr_text: str) -> str | None:
 
 
 def _google_canonise(name: str, context: str) -> str | None:
-    """Search Google for the canonical spelling of a name.
-
-    Uses a simple HTTP request to Google's search and parses snippets.
-    Returns the best spelling found, or None.
-    """
+    """Search Google for the canonical spelling of a name."""
     query = f"{name} {context}"
     snippet = _search_snippet(query)
     if not snippet:
         return None
 
-    # Look for the name (case-insensitive) in the snippet
     pattern = re.compile(re.escape(name), re.IGNORECASE)
     match = pattern.search(snippet)
     if match:
@@ -202,7 +232,6 @@ def _search_snippet(query: str) -> str:
 
 def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
     """Extract a short bio-like sentence from a search snippet."""
-    # Look for patterns like "é um(a) ...", "conhecido(a) por..."
     bio_patterns = [
         r"é\s+(?:um(?:a)?)\s+([^.]{10,80})",
         r"conhecido(?:a)?\s+(?:como|por)\s+([^.]{10,80})",

@@ -12,7 +12,13 @@ from .names import (
     validate_and_canonise,
     generate_mini_bio,
 )
-from .content import generate_summary, generate_chapters, generate_keywords
+from .content import (
+    generate_summary,
+    generate_chapters,
+    generate_keywords,
+    generate_topics,
+    extract_social_links,
+)
 from .template import render_description
 
 
@@ -74,7 +80,6 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
     print("→ Processando OCR na thumbnail...", file=sys.stderr)
     ocr_result = extract_text_from_thumbnail(video.thumbnail_path)
     ocr_full = ocr_result["ocr_text_full"]
-    ocr_short = ocr_result["ocr_text_short"]
 
     # === Step 3: Name extraction and validation ===
     print("→ Extraindo e validando nomes...", file=sys.stderr)
@@ -94,17 +99,20 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         ocr_full=ocr_full,
     )
 
-    # Generate mini-bios
+    # Generate mini-bios and roles
     for person in validated:
         if not person.mini_bio:
-            person.mini_bio = generate_mini_bio(person.canonical, video.channel)
+            role, bio = generate_mini_bio(person.canonical, video.channel)
+            person.role = role
+            person.mini_bio = bio
 
-    participant_names = [p.canonical for p in validated]
+    # Only present participants for the description
+    present_participants = [p for p in validated if p.present_in_video]
+    participant_names = [p.canonical for p in present_participants]
 
     # === Step 4: Content generation ===
     print("→ Gerando conteúdo...", file=sys.stderr)
 
-    # Main topic (heuristic: first significant phrase from title)
     main_topic = _extract_main_topic(video.title)
 
     summary = generate_summary(
@@ -128,17 +136,27 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         channel_name=video.channel,
     )
 
+    topics = generate_topics(
+        title=video.title,
+        description=video.description,
+        transcript=video.transcript,
+        keywords=keywords,
+    )
+
+    social_links = extract_social_links(video.description)
+
     # === Step 5: Render final description ===
     print("→ Renderizando descrição final...", file=sys.stderr)
     description = render_description(
         title=video.title,
         main_topic=main_topic,
-        ocr_short=ocr_short,
         summary=summary,
         participants=validated,
+        topics=topics,
         chapters=chapters,
         keywords=keywords,
         channel_name=video.channel,
+        social_links=social_links,
         asr_generated=video.asr_generated,
     )
 
@@ -148,21 +166,23 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         "channel": video.channel,
         "upload_date": video.upload_date,
         "duration": video.duration,
-        "ocr_text_full": ocr_full,
-        "ocr_text_short": ocr_short,
         "participants": [
             {
                 "name": p.canonical,
                 "source": p.source,
                 "trust": p.trust_level,
                 "bio": p.mini_bio,
+                "role": p.role,
+                "present_in_video": p.present_in_video,
             }
             for p in validated
         ],
+        "topics": topics,
         "chapters": chapters,
         "keywords": keywords,
         "summary": summary,
         "main_topic": main_topic,
+        "social_links": social_links,
         "asr_generated": video.asr_generated,
         "description": description,
     }
@@ -177,7 +197,6 @@ def _extract_main_topic(title: str) -> str:
     for sep in ["|", " - ", ":"]:
         if sep in title:
             parts = title.split(sep)
-            # Pick the longer part as the topic
             topic = max(parts, key=lambda p: len(p.strip()))
             return topic.strip()
     return title.strip()
