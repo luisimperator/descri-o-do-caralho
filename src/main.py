@@ -90,6 +90,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         description=video.description,
         ocr_names=ocr_names,
         transcript=video.transcript,
+        channel_name=video.channel,
     )
 
     validated = validate_and_canonise(

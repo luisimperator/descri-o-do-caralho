@@ -18,15 +18,30 @@ class ValidatedName:
     present_in_video: bool = True  # True = participant, False = just cited
 
 
+# Words that look like capitalised sequences but aren't person names
+_NON_NAME_WORDS = {
+    "entrevistador", "entrevistadora", "palestrante", "apresentador",
+    "apresentadora", "participante", "convidado", "convidada",
+    "mediador", "mediadora", "moderador", "moderadora", "ouvinte",
+    "gestao", "gestão", "arbitragem", "podcast", "episódio", "episodio",
+    "canal", "inscreva", "compartilhe", "youtube", "instagram",
+    "twitter", "facebook", "whatsapp", "telegram", "linkedin",
+    "introdução", "introducao", "conclusão", "conclusao",
+    "parte", "capitulo", "capítulo", "resumo", "destaque",
+}
+
+
 def collect_name_candidates(
     title: str,
     description: str,
     ocr_names: list[str],
     transcript: str,
+    channel_name: str = "",
 ) -> list[str]:
     """Gather potential person names from all available sources.
 
     A name must be 2-5 capitalised words. Duplicates are merged.
+    Filters out channel name and common non-person words.
     """
     candidates: list[str] = list(ocr_names)
 
@@ -42,7 +57,12 @@ def collect_name_candidates(
             candidates.append(name)
 
     # Deduplicate (approximate: lowercase match)
-    return _deduplicate(candidates)
+    candidates = _deduplicate(candidates)
+
+    # Filter out non-person names
+    candidates = _filter_non_names(candidates, channel_name)
+
+    return candidates
 
 
 def validate_and_canonise(
@@ -139,21 +159,81 @@ _ROLE_KEYWORDS = [
     "investidor", "investidora", "político", "política", "engenheiro",
     "engenheira", "cientista", "pesquisador", "pesquisadora", "youtuber",
     "streamer", "fundador", "fundadora", "consultor", "consultora",
-    "CEO", "diretor", "diretora", "produtor", "produtora", "músico",
-    "música", "ator", "atriz", "cantor", "cantora", "filósofo", "filósofa",
+    "diretor", "diretora", "produtor", "produtora", "músico",
+    "cantor", "cantora", "filósofo", "filósofa",
     "psicólogo", "psicóloga", "historiador", "historiadora",
-    "sociólogo", "socióloga", "criador de conteúdo", "criadora de conteúdo",
-    "coach", "mentor", "mentora", "podcaster",
+    "sociólogo", "socióloga", "podcaster",
+]
+
+# Build a compiled regex that matches role keywords as whole words only
+_ROLE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(r) for r in _ROLE_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+# Indicators that Google returned a blocked/captcha page
+_BLOCKED_INDICATORS = [
+    "redirecionamento não iniciar",
+    "unusual traffic",
+    "captcha",
+    "are you a robot",
+    "nosso sistema detectou",
+    "{display:none}",
+    "recaptcha",
+    "sorry/index",
+    "detected unusual traffic",
+    "clique aqui se o redirecionamento",
 ]
 
 
-def _extract_role(text: str) -> str:
-    """Extract a professional role from text."""
+def _is_blocked_response(text: str) -> bool:
+    """Detect if Google returned a captcha/block page instead of results."""
     text_lower = text.lower()
-    for role in _ROLE_KEYWORDS:
-        if role.lower() in text_lower:
-            return role.capitalize()
+    return any(ind in text_lower for ind in _BLOCKED_INDICATORS)
+
+
+def _extract_role(text: str) -> str:
+    """Extract a professional role from text using whole-word matching."""
+    match = _ROLE_PATTERN.search(text)
+    if match:
+        return match.group(1).capitalize()
     return ""
+
+
+def _filter_non_names(candidates: list[str], channel_name: str) -> list[str]:
+    """Remove candidates that are clearly not person names."""
+    channel_lower = channel_name.lower().strip()
+    # Break channel name into words for partial matching
+    channel_words = set(channel_lower.split())
+
+    result: list[str] = []
+    for name in candidates:
+        name_lower = name.lower().strip()
+        name_words = set(name_lower.split())
+
+        # Skip if any word is in the non-name blacklist
+        if name_words & _NON_NAME_WORDS:
+            continue
+
+        # Skip if the name matches the channel name
+        if channel_lower and (
+            name_lower == channel_lower
+            or name_lower in channel_lower
+            or channel_lower in name_lower
+        ):
+            continue
+
+        # Skip if all words of the name are channel words
+        if channel_words and name_words <= channel_words:
+            continue
+
+        # Skip names with only 1-letter words (OCR artifacts)
+        if all(len(w) <= 2 for w in name_words):
+            continue
+
+        result.append(name)
+
+    return result
 
 
 def _extract_capitalised_sequences(text: str) -> list[str]:
@@ -184,7 +264,6 @@ def _pick_ocr_spelling(name: str, ocr_text: str) -> str | None:
     lower = name.lower()
     for line in ocr_text.splitlines():
         if lower in line.lower():
-            # Extract the matching span
             idx = line.lower().index(lower)
             return line[idx : idx + len(name)]
     return None
@@ -206,7 +285,10 @@ def _google_canonise(name: str, context: str) -> str | None:
 
 
 def _search_snippet(query: str) -> str:
-    """Fetch a search snippet from Google. Returns raw text or empty string."""
+    """Fetch a search snippet from Google. Returns raw text or empty string.
+
+    Returns empty if Google blocks the request (captcha/redirect).
+    """
     encoded = urllib.parse.quote_plus(query)
     url = f"https://www.google.com/search?q={encoded}&hl=pt-BR"
     req = urllib.request.Request(
@@ -225,7 +307,13 @@ def _search_snippet(query: str) -> str:
         # Rough extraction of visible text from snippets
         text = re.sub(r"<[^>]+>", " ", html)
         text = re.sub(r"\s+", " ", text)
-        return text[:2000]
+        text = text[:2000]
+
+        # Detect blocked/captcha responses
+        if _is_blocked_response(text):
+            return ""
+
+        return text
     except Exception:
         return ""
 
