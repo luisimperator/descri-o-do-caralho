@@ -1,6 +1,7 @@
 """Descrição Arbitragem — Web interface using Flask."""
 
 import json
+import os
 import threading
 import uuid
 
@@ -26,6 +27,13 @@ def api_generate():
     url = data.get("url", "").strip()
     if not url:
         return jsonify({"error": "URL é obrigatória"}), 400
+
+    if not os.environ.get("YOUTUBE_API_KEY", "").strip():
+        return jsonify({
+            "error": "YOUTUBE_API_KEY não configurada. "
+            "Crie uma API key em console.cloud.google.com e "
+            "adicione como variável de ambiente no Railway."
+        }), 400
 
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"status": "running", "result": None, "error": None}
