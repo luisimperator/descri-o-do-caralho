@@ -70,6 +70,7 @@ def validate_and_canonise(
     channel_name: str,
     video_title: str,
     ocr_full: str,
+    description: str = "",
 ) -> list[ValidatedName]:
     """Apply the Anti-Error Protocol to each candidate.
 
@@ -78,6 +79,9 @@ def validate_and_canonise(
       2. Complete OCR match
       3. Canonised via web search (Google)
       4. Repeated >= 2x in transcript
+
+    present_in_video is True if the name appears in title, description,
+    or OCR (thumbnail). Names only from transcript are considered "cited".
     """
     validated: list[ValidatedName] = []
 
@@ -89,9 +93,10 @@ def validate_and_canonise(
 
         in_title = _fuzzy_in(name, video_title)
         in_ocr = _fuzzy_in(name, ocr_full)
+        in_description = _fuzzy_in(name, description)
 
-        # Criterion 1: present in title
-        if in_title:
+        # Criterion 1: present in title or description
+        if in_title or in_description:
             criteria_met += 1
 
         # Criterion 2: complete OCR match
@@ -113,9 +118,9 @@ def validate_and_canonise(
         criteria_met += 1  # baseline: survived extraction
 
         if criteria_met >= 2:
-            # Determine if person is actually PRESENT in the video
-            # vs just being cited/discussed
-            present = in_title or in_ocr
+            # Present if in title, description, or thumbnail (OCR).
+            # Names ONLY from transcript = cited, not present.
+            present = in_title or in_ocr or in_description
             validated.append(
                 ValidatedName(
                     canonical=best_spelling,

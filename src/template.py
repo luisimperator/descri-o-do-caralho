@@ -27,7 +27,11 @@ def render_description(
     lines: list[str] = []
 
     # --- Header ---
-    lines.append(f"\U0001f399\ufe0f {title} | {main_topic}")
+    # Don't duplicate topic if it's already in the title
+    if main_topic.lower() in title.lower():
+        lines.append(f"\U0001f399\ufe0f {title}")
+    else:
+        lines.append(f"\U0001f399\ufe0f {title} | {main_topic}")
     lines.append("")
 
     # --- Intro paragraph ---

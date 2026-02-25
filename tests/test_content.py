@@ -56,7 +56,7 @@ def test_generate_summary_fallback():
         transcript="",
         participant_names=["João Silva"],
     )
-    assert "João Silva" in summary
+    assert "título" in summary.lower()
 
 
 def test_generate_summary_with_content():

@@ -98,6 +98,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         channel_name=video.channel,
         video_title=video.title,
         ocr_full=ocr_full,
+        description=video.description,
     )
 
     # Generate mini-bios and roles
@@ -192,14 +193,18 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
 def _extract_main_topic(title: str) -> str:
     """Extract the main topic from the video title.
 
-    Heuristic: take text after common separators like |, -, :, or use the
-    full title if no separator is found.
+    Heuristic: take text after common separators like |, -, :.
+    Picks the longest part that is NOT a show/podcast name.
     """
     for sep in ["|", " - ", ":"]:
         if sep in title:
-            parts = title.split(sep)
-            topic = max(parts, key=lambda p: len(p.strip()))
-            return topic.strip()
+            parts = [p.strip() for p in title.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                # Skip the first part (usually the show name), pick the longest of the rest
+                rest = parts[1:]
+                return max(rest, key=len).strip()
+            elif parts:
+                return parts[0].strip()
     return title.strip()
 
 

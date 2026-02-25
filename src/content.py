@@ -9,30 +9,30 @@ def generate_summary(
     description: str,
     transcript: str,
     participant_names: list[str],
-    max_words: int = 150,
+    max_words: int = 40,
 ) -> str:
-    """Generate a concise summary (max 150 words) of the video content."""
-    source_text = f"{title}. {description}. {transcript}"
+    """Generate a SHORT summary for the intro paragraph.
 
-    sentences = _split_sentences(source_text)
-    if not sentences:
-        return f"Neste episódio, {', '.join(participant_names) or 'os participantes'} discutem {title}."
+    Returns a concise description of the episode content (~30-40 words).
+    This is used after "No episódio de hoje, X exploram ..."
+    """
+    names_str = ", ".join(participant_names) if participant_names else "os participantes"
 
-    scored = _score_sentences(sentences, title, participant_names)
+    # Try to extract a good summary from the description first
+    if description:
+        summary = _extract_intro_from_description(description, title, max_words)
+        if summary:
+            return summary
 
-    summary_parts: list[str] = []
-    word_count = 0
-    for sentence, _ in scored:
-        words = sentence.split()
-        if word_count + len(words) > max_words:
-            break
-        summary_parts.append(sentence)
-        word_count += len(words)
+    # Try from transcript
+    if transcript:
+        summary = _extract_intro_from_text(transcript, title, max_words)
+        if summary:
+            return summary
 
-    if not summary_parts:
-        return f"Neste episódio, {', '.join(participant_names) or 'os participantes'} discutem {title}."
-
-    return " ".join(summary_parts)
+    # Fallback: use the topic from title
+    topic = _clean_title_for_summary(title)
+    return f"temas como {topic}."
 
 
 def generate_topics(
@@ -44,15 +44,23 @@ def generate_topics(
 ) -> list[str]:
     """Extract main discussion topics from the video content.
 
-    Returns a list of topic strings (not timestamped).
+    Returns a list of meaningful topic phrases (not single words).
     """
     topics: list[str] = []
 
-    # Extract from title parts (split by separators)
-    for sep in ["|", " - ", ":", "–"]:
+    # Extract topic phrases from the description
+    if description:
+        desc_topics = _extract_topics_from_description(description)
+        for t in desc_topics:
+            if t not in topics and len(topics) < max_topics:
+                topics.append(t)
+
+    # Extract from title parts (skip the show name — usually first part)
+    for sep in ["|", " - ", "–"]:
         if sep in title:
             parts = [p.strip() for p in title.split(sep) if len(p.strip()) > 3]
-            for p in parts:
+            # Skip first part (show name), use the rest as topics
+            for p in parts[1:]:
                 if p not in topics and len(topics) < max_topics:
                     topics.append(p)
 
@@ -62,11 +70,12 @@ def generate_topics(
         if h not in topics and len(topics) < max_topics:
             topics.append(h)
 
-    # Fill from keywords if needed (capitalize and group pairs)
+    # Fill from keyword pairs if still too few
     if len(topics) < 3:
         for kw in keywords:
             topic = kw.capitalize()
-            if topic not in topics and len(topics) < max_topics:
+            # Skip single short words, prefer meaningful terms
+            if len(topic) > 5 and topic not in topics and len(topics) < max_topics:
                 topics.append(topic)
 
     return topics[:max_topics]
@@ -101,6 +110,10 @@ def generate_chapters(
         chapters.append({"start": current, "title": title})
         current += interval
 
+    # Add a conclusion chapter near the end
+    if duration > 0 and chapters[-1]["start"] < duration - 60:
+        chapters.append({"start": duration - 60, "title": "Conclusão"})
+
     return chapters
 
 
@@ -129,6 +142,7 @@ def generate_keywords(
     words = re.findall(r"\b[a-záàâãéèêíïóôõúüç]{4,}\b", all_text_lower)
     counter = Counter(words)
 
+    # Remove stop words, URLs, and garbage
     stop_words = {
         "para", "como", "mais", "está", "isso", "esse", "essa", "esses",
         "essas", "aqui", "aquele", "aquela", "então", "porque", "quando",
@@ -142,9 +156,28 @@ def generate_keywords(
         "exemplo", "pessoas", "tempo", "anos", "hoje", "nesse", "nessa",
         "pela", "pelo", "numa", "desse", "dessa", "algo", "assim",
         "bem", "ter", "tem", "são", "uma", "uns", "umas",
+        # URLs and web garbage
+        "https", "http", "www", "com", "org", "youtube", "youtu",
+        "watch", "channel", "playlist", "subscribe",
+        # Social media
+        "instagram", "twitter", "facebook", "whatsapp", "telegram",
+        "linkedin", "tiktok",
+        # Generic podcast words
+        "canal", "vídeo", "video", "episódio", "episodio", "podcast",
+        "inscreva", "compartilhe", "curtir", "like", "link",
+        "descrição", "descricao", "comentário", "comentario",
+        # Common verbs
+        "disse", "falou", "falar", "dizer", "saber", "poder", "querer",
+        "estar", "ficar", "olhar", "pensar", "achar", "deixar", "passar",
+        "conhecer", "entender", "começar", "chegar", "colocar",
     }
     for sw in stop_words:
         counter.pop(sw, None)
+
+    # Remove channel name words
+    for w in channel_name.lower().split():
+        if len(w) > 2:
+            counter.pop(w, None)
 
     ocr_words = re.findall(r"\b[a-záàâãéèêíïóôõúüç]{4,}\b", ocr_text.lower())
     for w in ocr_words:
@@ -162,30 +195,24 @@ def generate_keywords(
 
 
 def extract_social_links(description: str) -> dict:
-    """Extract social media handles/URLs from the video description.
-
-    Returns a dict with keys like 'instagram', 'twitter', 'facebook'.
-    """
+    """Extract social media handles/URLs from the video description."""
     if not description:
         return {}
 
     links: dict[str, str] = {}
 
-    # Instagram — try URL first, then "Instagram: @handle"
     ig = re.search(r"instagram\.com/([a-zA-Z0-9_.]+)", description, re.IGNORECASE)
     if not ig:
         ig = re.search(r"instagram:\s*@([a-zA-Z0-9_.]+)", description, re.IGNORECASE)
     if ig:
         links["instagram"] = f"@{ig.group(1)}"
 
-    # Twitter / X — try URL first, then "Twitter: @handle"
     tw = re.search(r"(?:twitter|x)\.com/([a-zA-Z0-9_]+)", description, re.IGNORECASE)
     if not tw:
         tw = re.search(r"twitter:\s*@([a-zA-Z0-9_]+)", description, re.IGNORECASE)
     if tw:
         links["twitter"] = f"@{tw.group(1)}"
 
-    # Facebook
     fb = re.search(r"facebook\.com/([a-zA-Z0-9.]+)", description, re.IGNORECASE)
     if fb:
         links["facebook"] = fb.group(1)
@@ -197,43 +224,117 @@ def extract_social_links(description: str) -> dict:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _extract_intro_from_description(description: str, title: str, max_words: int) -> str:
+    """Extract a clean intro summary from the video description.
+
+    Looks for the first meaningful sentence about the episode content.
+    """
+    # Remove URLs from description
+    clean = re.sub(r"https?://\S+", "", description)
+    # Remove emoji
+    clean = re.sub(r"[\U0001f300-\U0001f9ff]", "", clean)
+
+    sentences = re.split(r"[.!?\n]+", clean)
+    # Look for a sentence that describes the content (contains topic keywords)
+    title_words = set(w.lower() for w in title.split() if len(w) > 3)
+
+    for sent in sentences:
+        sent = sent.strip()
+        words = sent.split()
+        if len(words) < 5 or len(words) > 50:
+            continue
+        # Skip sentences that are just names or social media
+        sent_lower = sent.lower()
+        if any(skip in sent_lower for skip in ["inscreva", "siga", "curta", "@", "http"]):
+            continue
+        # Prefer sentences with title word overlap
+        overlap = sum(1 for w in words if w.lower() in title_words)
+        if overlap >= 1:
+            # Take the sentence, truncated to max_words
+            result_words = words[:max_words]
+            result = " ".join(result_words)
+            if not result.endswith("."):
+                result += "."
+            return result
+
+    # Fallback: take first reasonable sentence
+    for sent in sentences:
+        sent = sent.strip()
+        words = sent.split()
+        if 5 <= len(words) <= 50:
+            sent_lower = sent.lower()
+            if not any(skip in sent_lower for skip in ["inscreva", "siga", "curta", "@", "http"]):
+                result_words = words[:max_words]
+                result = " ".join(result_words)
+                if not result.endswith("."):
+                    result += "."
+                return result
+
+    return ""
+
+
+def _extract_intro_from_text(text: str, title: str, max_words: int) -> str:
+    """Extract a summary sentence from transcript text."""
+    sentences = re.split(r"[.!?\n]+", text)
+    title_words = set(w.lower() for w in title.split() if len(w) > 3)
+
+    for sent in sentences[:20]:  # only check first 20 sentences
+        sent = sent.strip()
+        words = sent.split()
+        if len(words) < 8 or len(words) > 40:
+            continue
+        overlap = sum(1 for w in words if w.lower() in title_words)
+        if overlap >= 1:
+            result_words = words[:max_words]
+            result = " ".join(result_words)
+            if not result.endswith("."):
+                result += "."
+            return result
+
+    return ""
+
+
+def _clean_title_for_summary(title: str) -> str:
+    """Remove show name from title, keeping the topic."""
+    for sep in ["|", " - ", ":", "–"]:
+        if sep in title:
+            parts = [p.strip() for p in title.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                return parts[-1].lower()
+    return title.lower()
+
+
+def _extract_topics_from_description(description: str) -> list[str]:
+    """Extract meaningful topic phrases from the description."""
+    topics: list[str] = []
+
+    # Remove URLs and emojis
+    clean = re.sub(r"https?://\S+", "", description)
+    clean = re.sub(r"[\U0001f300-\U0001f9ff]", "", clean)
+
+    # Look for topic-indicating patterns in Portuguese
+    patterns = [
+        r"(?:sobre|temas?:?)\s+([^,.!?\n]{5,50})",
+        r"(?:aborda|discute|explora|analisa)\w*\s+([^,.!?\n]{5,50})",
+        r"(?:bate-papo|conversa|entrevista)\s+(?:sobre|com foco em)\s+([^,.!?\n]{5,50})",
+        r"(?:práticas? de|estratégias? de|gestão de)\s+([^,.!?\n]{5,40})",
+    ]
+
+    for pat in patterns:
+        for m in re.finditer(pat, clean, re.IGNORECASE):
+            topic = m.group(1).strip().rstrip(",.")
+            if topic and len(topic) > 5 and topic not in topics:
+                topics.append(topic.capitalize())
+            if len(topics) >= 6:
+                return topics
+
+    return topics
+
+
 def _split_sentences(text: str) -> list[str]:
     """Split text into sentences."""
     raw = re.split(r"[.!?\n]+", text)
     return [s.strip() for s in raw if len(s.strip().split()) >= 5]
-
-
-def _score_sentences(
-    sentences: list[str],
-    title: str,
-    names: list[str],
-) -> list[tuple[str, float]]:
-    """Score sentences by relevance to the topic."""
-    title_words = set(title.lower().split())
-    name_words = {n.lower() for n in names}
-
-    scored: list[tuple[str, float]] = []
-    for i, sent in enumerate(sentences):
-        score = 0.0
-        words = set(sent.lower().split())
-
-        overlap = len(words & title_words)
-        score += overlap * 2.0
-
-        for n in name_words:
-            if n in sent.lower():
-                score += 3.0
-
-        score -= i * 0.1
-
-        wc = len(sent.split())
-        if 10 <= wc <= 30:
-            score += 1.0
-
-        scored.append((sent, score))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return scored
 
 
 def _extract_topic_hints(transcript: str, max_hints: int = 20) -> list[str]:
