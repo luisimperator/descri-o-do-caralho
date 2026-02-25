@@ -20,6 +20,13 @@ from .content import (
     extract_social_links,
 )
 from .template import render_description
+from .ai import (
+    gemini_available,
+    research_participant,
+    generate_chapter_titles,
+    generate_summary_ai,
+    generate_topics_ai,
+)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -70,8 +77,11 @@ def main(argv: list[str] | None = None) -> None:
 def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
     """Execute the full description generation pipeline.
 
-    Returns a dict with all intermediate data and the final description.
+    Uses Gemini AI when GEMINI_API_KEY is set for better participant
+    research, chapter titles, summary, and topics.
     """
+    use_ai = gemini_available()
+
     # === Step 1: Extract video data ===
     print("→ Extraindo dados do vídeo...", file=sys.stderr)
     video = extract_video_data(youtube_url, work_dir)
@@ -102,11 +112,18 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
     )
 
     # Generate mini-bios and roles
-    for person in validated:
-        if not person.mini_bio:
-            role, bio = generate_mini_bio(person.canonical, video.channel)
-            person.role = role
-            person.mini_bio = bio
+    if use_ai:
+        print("→ Pesquisando participantes via Gemini...", file=sys.stderr)
+        for person in validated:
+            result_ai = research_participant(person.canonical, video.channel)
+            person.role = result_ai.get("role", "")
+            person.mini_bio = result_ai.get("bio", "Participante do programa")
+    else:
+        for person in validated:
+            if not person.mini_bio:
+                role, bio = generate_mini_bio(person.canonical, video.channel)
+                person.role = role
+                person.mini_bio = bio
 
     # Only present participants for the description
     present_participants = [p for p in validated if p.present_in_video]
@@ -117,19 +134,6 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
 
     main_topic = _extract_main_topic(video.title)
 
-    summary = generate_summary(
-        title=video.title,
-        description=video.description,
-        transcript=video.transcript,
-        participant_names=participant_names,
-    )
-
-    chapters = generate_chapters(
-        existing_chapters=video.chapters,
-        transcript=video.transcript,
-        duration=video.duration,
-    )
-
     keywords = generate_keywords(
         title=video.title,
         description=video.description,
@@ -138,12 +142,55 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         channel_name=video.channel,
     )
 
-    topics = generate_topics(
-        title=video.title,
-        description=video.description,
+    # --- Summary ---
+    if use_ai:
+        print("→ Gerando resumo via Gemini...", file=sys.stderr)
+        summary = generate_summary_ai(
+            title=video.title,
+            description=video.description,
+            transcript=video.transcript,
+            participant_names=participant_names,
+        )
+    if not use_ai or not summary:
+        summary = generate_summary(
+            title=video.title,
+            description=video.description,
+            transcript=video.transcript,
+            participant_names=participant_names,
+        )
+
+    # --- Chapters ---
+    chapters = generate_chapters(
+        existing_chapters=video.chapters,
         transcript=video.transcript,
-        keywords=keywords,
+        duration=video.duration,
     )
+    if use_ai and video.transcript:
+        print("→ Gerando capítulos via Gemini...", file=sys.stderr)
+        ai_chapters = generate_chapter_titles(
+            transcript=video.transcript,
+            title=video.title,
+            duration=video.duration,
+            existing_chapters=chapters,
+        )
+        if ai_chapters:
+            chapters = ai_chapters
+
+    # --- Topics ---
+    if use_ai:
+        print("→ Gerando tópicos via Gemini...", file=sys.stderr)
+        topics = generate_topics_ai(
+            title=video.title,
+            description=video.description,
+            transcript=video.transcript,
+        )
+    if not use_ai or not topics:
+        topics = generate_topics(
+            title=video.title,
+            description=video.description,
+            transcript=video.transcript,
+            keywords=keywords,
+        )
 
     social_links = extract_social_links(video.description)
 
