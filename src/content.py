@@ -99,14 +99,32 @@ def generate_chapters(
 
     topic_hints = _extract_topic_hints(transcript)
 
+    # Generic section names for when there are no topic hints
+    generic_titles = [
+        "Contexto e cenário atual",
+        "Desenvolvimento do tema",
+        "Análise e perspectivas",
+        "Aprofundamento",
+        "Debates e reflexões",
+        "Desdobramentos",
+        "Perspectivas práticas",
+        "Considerações importantes",
+        "Visão estratégica",
+        "Panorama geral",
+    ]
+
     current = interval
     hint_idx = 0
+    generic_idx = 0
     while current < duration and len(chapters) < max_chapters:
         if hint_idx < len(topic_hints):
             title = topic_hints[hint_idx]
             hint_idx += 1
+        elif generic_idx < len(generic_titles):
+            title = generic_titles[generic_idx]
+            generic_idx += 1
         else:
-            title = f"Parte {len(chapters) + 1}"
+            title = f"Continuação ({len(chapters) + 1})"
         chapters.append({"start": current, "title": title})
         current += interval
 

@@ -1,14 +1,22 @@
 """Gemini AI integration for research and content generation."""
 
 import json
+import logging
 import os
 import urllib.request
 import urllib.parse
 
+logger = logging.getLogger(__name__)
+
 
 def gemini_available() -> bool:
     """Check if Gemini API key is configured."""
-    return bool(os.environ.get("GEMINI_API_KEY", "").strip())
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key:
+        logger.warning("GEMINI_API_KEY não configurada — IA desabilitada")
+    else:
+        logger.info("GEMINI_API_KEY configurada (%s...)", key[:8])
+    return bool(key)
 
 
 def research_participant(name: str, channel_name: str) -> dict:
@@ -188,6 +196,7 @@ def _call_gemini(prompt: str, model: str = "gemini-2.0-flash") -> str:
     """Call Gemini API and return the text response."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
+        logger.warning("_call_gemini: sem API key, pulando")
         return ""
 
     url = (
@@ -212,15 +221,33 @@ def _call_gemini(prompt: str, model: str = "gemini-2.0-flash") -> str:
         method="POST",
     )
 
+    logger.info("Chamando Gemini (%s) — prompt: %.80s...", model, prompt)
+
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
         candidates = data.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if parts:
-                return parts[0].get("text", "")
-    except Exception:
-        pass
+        if not candidates:
+            logger.error("Gemini retornou sem candidates: %s", json.dumps(data, ensure_ascii=False)[:500])
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if not parts:
+            logger.error("Gemini retornou candidates sem parts: %s", json.dumps(candidates[0], ensure_ascii=False)[:500])
+            return ""
+        text = parts[0].get("text", "")
+        logger.info("Gemini respondeu OK (%d chars): %.120s...", len(text), text)
+        return text
+    except urllib.error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        logger.error("Gemini HTTP %d: %s — %s", exc.code, exc.reason, error_body)
+    except urllib.error.URLError as exc:
+        logger.error("Gemini URLError (rede?): %s", exc.reason)
+    except Exception as exc:
+        logger.error("Gemini erro inesperado: %s", exc)
 
     return ""

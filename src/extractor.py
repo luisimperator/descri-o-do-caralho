@@ -6,6 +6,7 @@ for local/dev usage.
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -14,6 +15,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -206,10 +209,12 @@ def _fetch_transcript_api(video_id: str) -> tuple[str, bool]:
         text = " ".join(
             snippet.text for snippet in transcript_list.snippets
         )
+        logger.info("Transcrição obtida: %d chars (idiomas: pt/pt-BR/en)", len(text))
         # youtube-transcript-api doesn't easily distinguish manual vs auto
         # Assume auto-generated if fetched successfully
         return text, True
-    except Exception:
+    except Exception as exc:
+        logger.warning("Falha ao obter transcrição para %s: %s", video_id, exc)
         return "", False
 
 

@@ -45,6 +45,14 @@ button{padding:.75rem 1.5rem;border:none;border-radius:8px;font-size:.95rem;font
 .error-msg.visible{display:block}
 .keywords{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem}
 .keyword{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:.2rem .5rem;font-size:.75rem;color:var(--text2)}
+.diag-bar{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.6rem .8rem;margin-bottom:1rem;font-size:.8rem;display:none}
+.diag-bar.visible{display:block}
+.diag-bar .badge{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.7rem;font-weight:500;margin-right:.4rem}
+.badge-ok{background:#1b3a1b;color:#4caf50;border:1px solid #2d5a2d}
+.badge-fail{background:#3a1b1b;color:#ff8888;border:1px solid #5c2020}
+.badge-warn{background:#3a351b;color:#ffc107;border:1px solid #5c5520}
+.config-ok{color:#4caf50}
+.config-fail{color:#ff8888}
 footer{padding:1rem;text-align:center;color:var(--text2);font-size:.75rem;border-top:1px solid var(--border);width:100%}
 </style>
 </head>
@@ -52,6 +60,7 @@ footer{padding:1rem;text-align:center;color:var(--text2);font-size:.75rem;border
 <header>
   <h1>Descrição Arbitragem</h1>
   <p>Gera descrições estruturadas para vídeos do YouTube automaticamente</p>
+  <div id="configStatus" style="margin-top:.5rem;font-size:.8rem;color:var(--text2)"></div>
 </header>
 <main>
   <div class="input-group">
@@ -65,6 +74,8 @@ footer{padding:1rem;text-align:center;color:var(--text2);font-size:.75rem;border
     <div class="spinner" id="spinner"></div>
     <span class="status-text" id="statusText">Processando...</span>
   </div>
+
+  <div class="diag-bar" id="diagBar"></div>
 
   <div class="result-box" id="resultBox">
     <div class="result-meta" id="resultMeta"></div>
@@ -96,6 +107,25 @@ footer{padding:1rem;text-align:center;color:var(--text2);font-size:.75rem;border
 <script>
 let currentJobId = null;
 let pollTimer = null;
+
+// Check config on page load
+(function checkHealth() {
+  fetch('/api/health').then(r => r.json()).then(data => {
+    const el = document.getElementById('configStatus');
+    const parts = [];
+    if (data.youtube_api) {
+      parts.push('<span class="config-ok">YouTube API OK</span>');
+    } else {
+      parts.push('<span class="config-fail">YouTube API NAO CONFIGURADA</span>');
+    }
+    if (data.gemini_api) {
+      parts.push('<span class="config-ok">Gemini AI OK</span>');
+    } else {
+      parts.push('<span class="config-fail">Gemini AI NAO CONFIGURADA</span>');
+    }
+    el.innerHTML = parts.join(' &bull; ');
+  }).catch(() => {});
+})();
 
 function startGeneration() {
   const url = document.getElementById('urlInput').value.trim();
@@ -162,6 +192,29 @@ function pollStatus() {
 }
 
 function showResult(result) {
+  // Diagnostics bar
+  const diag = result.diagnostics || {};
+  const diagEl = document.getElementById('diagBar');
+  let diagHtml = '';
+  if (diag.gemini_configured) {
+    if (diag.gemini_used) {
+      diagHtml += '<span class="badge badge-ok">Gemini AI ativo</span>';
+    } else {
+      diagHtml += '<span class="badge badge-fail">Gemini configurado mas nao usado</span>';
+    }
+  } else {
+    diagHtml += '<span class="badge badge-fail">Gemini nao configurado</span>';
+  }
+  diagHtml += diag.ai_summary ? '<span class="badge badge-ok">Resumo IA</span>' : '<span class="badge badge-warn">Resumo heuristico</span>';
+  diagHtml += diag.ai_chapters ? '<span class="badge badge-ok">Capitulos IA</span>' : '<span class="badge badge-warn">Capitulos auto</span>';
+  diagHtml += diag.ai_topics ? '<span class="badge badge-ok">Topicos IA</span>' : '<span class="badge badge-warn">Topicos heuristico</span>';
+  diagHtml += diag.transcript_available ? '<span class="badge badge-ok">Transcricao OK</span>' : '<span class="badge badge-fail">Sem transcricao</span>';
+  if (diag.errors && diag.errors.length > 0) {
+    diagHtml += '<br><span style="color:#ff8888;font-size:.75rem;margin-top:.3rem;display:inline-block">Erros: ' + escapeHtml(diag.errors.join('; ')) + '</span>';
+  }
+  diagEl.innerHTML = diagHtml;
+  diagEl.classList.add('visible');
+
   // Meta cards
   const meta = document.getElementById('resultMeta');
   meta.innerHTML = '';

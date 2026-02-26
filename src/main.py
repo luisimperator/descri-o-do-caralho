@@ -2,8 +2,11 @@
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from .extractor import extract_video_data
 from .ocr import extract_text_from_thumbnail, extract_name_candidates_from_ocr
@@ -81,6 +84,18 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
     research, chapter titles, summary, and topics.
     """
     use_ai = gemini_available()
+    diagnostics = {
+        "gemini_configured": use_ai,
+        "gemini_used": False,
+        "transcript_available": False,
+        "chapters_from_video": False,
+        "ai_chapters": False,
+        "ai_summary": False,
+        "ai_topics": False,
+        "ai_participants": False,
+        "errors": [],
+    }
+    logger.info("Pipeline: Gemini disponível = %s", use_ai)
 
     # === Step 1: Extract video data ===
     print("→ Extraindo dados do vídeo...", file=sys.stderr)
@@ -118,12 +133,20 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
             result_ai = research_participant(person.canonical, video.channel)
             person.role = result_ai.get("role", "")
             person.mini_bio = result_ai.get("bio", "Participante do programa")
+            if result_ai.get("role"):
+                diagnostics["ai_participants"] = True
+                diagnostics["gemini_used"] = True
     else:
         for person in validated:
             if not person.mini_bio:
                 role, bio = generate_mini_bio(person.canonical, video.channel)
                 person.role = role
                 person.mini_bio = bio
+
+    diagnostics["transcript_available"] = bool(video.transcript)
+    diagnostics["chapters_from_video"] = bool(video.chapters)
+    logger.info("Pipeline: transcrição=%d chars, capítulos do vídeo=%d",
+                len(video.transcript), len(video.chapters))
 
     # Only present participants for the description
     present_participants = [p for p in validated if p.present_in_video]
@@ -143,6 +166,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
     )
 
     # --- Summary ---
+    summary = ""
     if use_ai:
         print("→ Gerando resumo via Gemini...", file=sys.stderr)
         summary = generate_summary_ai(
@@ -151,6 +175,13 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
             transcript=video.transcript,
             participant_names=participant_names,
         )
+        if summary:
+            diagnostics["ai_summary"] = True
+            diagnostics["gemini_used"] = True
+            logger.info("Pipeline: resumo AI OK (%d chars)", len(summary))
+        else:
+            logger.warning("Pipeline: resumo AI falhou, usando fallback")
+            diagnostics["errors"].append("Gemini summary returned empty")
     if not use_ai or not summary:
         summary = generate_summary(
             title=video.title,
@@ -165,18 +196,29 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         transcript=video.transcript,
         duration=video.duration,
     )
-    if use_ai and video.transcript:
-        print("→ Gerando capítulos via Gemini...", file=sys.stderr)
-        ai_chapters = generate_chapter_titles(
-            transcript=video.transcript,
-            title=video.title,
-            duration=video.duration,
-            existing_chapters=chapters,
-        )
-        if ai_chapters:
-            chapters = ai_chapters
+    if use_ai:
+        if video.transcript:
+            print("→ Gerando capítulos via Gemini...", file=sys.stderr)
+            ai_chapters = generate_chapter_titles(
+                transcript=video.transcript,
+                title=video.title,
+                duration=video.duration,
+                existing_chapters=chapters,
+            )
+            if ai_chapters:
+                chapters = ai_chapters
+                diagnostics["ai_chapters"] = True
+                diagnostics["gemini_used"] = True
+                logger.info("Pipeline: capítulos AI OK (%d capítulos)", len(chapters))
+            else:
+                logger.warning("Pipeline: capítulos AI falhou, usando fallback")
+                diagnostics["errors"].append("Gemini chapters returned empty")
+        else:
+            logger.warning("Pipeline: sem transcrição, capítulos AI pulados")
+            diagnostics["errors"].append("No transcript available for AI chapters")
 
     # --- Topics ---
+    topics = []
     if use_ai:
         print("→ Gerando tópicos via Gemini...", file=sys.stderr)
         topics = generate_topics_ai(
@@ -184,6 +226,13 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
             description=video.description,
             transcript=video.transcript,
         )
+        if topics:
+            diagnostics["ai_topics"] = True
+            diagnostics["gemini_used"] = True
+            logger.info("Pipeline: tópicos AI OK (%d tópicos)", len(topics))
+        else:
+            logger.warning("Pipeline: tópicos AI falhou, usando fallback")
+            diagnostics["errors"].append("Gemini topics returned empty")
     if not use_ai or not topics:
         topics = generate_topics(
             title=video.title,
@@ -208,6 +257,8 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         social_links=social_links,
         asr_generated=video.asr_generated,
     )
+
+    logger.info("Pipeline concluído: %s", json.dumps(diagnostics, ensure_ascii=False))
 
     return {
         "video_id": video.video_id,
@@ -234,6 +285,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         "social_links": social_links,
         "asr_generated": video.asr_generated,
         "description": description,
+        "diagnostics": diagnostics,
     }
 
 
