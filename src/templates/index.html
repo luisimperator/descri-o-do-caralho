@@ -119,7 +119,12 @@ let pollTimer = null;
       parts.push('<span class="config-fail">YouTube API NAO CONFIGURADA</span>');
     }
     if (data.gemini_api) {
-      parts.push('<span class="config-ok">Gemini AI OK</span>');
+      const gt = data.gemini_test || {};
+      if (gt.ok) {
+        parts.push('<span class="config-ok">Gemini AI OK (modelo: ' + escapeHtml(gt.model || '?') + ')</span>');
+      } else {
+        parts.push('<span class="config-fail">Gemini AI ERRO: ' + escapeHtml(gt.error || 'desconhecido') + '</span>');
+      }
     } else {
       parts.push('<span class="config-fail">Gemini AI NAO CONFIGURADA</span>');
     }
@@ -209,7 +214,9 @@ function showResult(result) {
   diagHtml += diag.ai_chapters ? '<span class="badge badge-ok">Capitulos IA</span>' : '<span class="badge badge-warn">Capitulos auto</span>';
   diagHtml += diag.ai_topics ? '<span class="badge badge-ok">Topicos IA</span>' : '<span class="badge badge-warn">Topicos heuristico</span>';
   diagHtml += diag.transcript_available ? '<span class="badge badge-ok">Transcricao OK</span>' : '<span class="badge badge-fail">Sem transcricao</span>';
-  if (diag.errors && diag.errors.length > 0) {
+  if (diag.gemini_errors && diag.gemini_errors.length > 0) {
+    diagHtml += '<br><span style="color:#ff8888;font-size:.75rem;margin-top:.3rem;display:inline-block">Gemini API: ' + escapeHtml(diag.gemini_errors[0]) + '</span>';
+  } else if (diag.errors && diag.errors.length > 0) {
     diagHtml += '<br><span style="color:#ff8888;font-size:.75rem;margin-top:.3rem;display:inline-block">Erros: ' + escapeHtml(diag.errors.join('; ')) + '</span>';
   }
   diagEl.innerHTML = diagHtml;

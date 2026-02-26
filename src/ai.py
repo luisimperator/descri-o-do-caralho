@@ -3,10 +3,17 @@
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 import urllib.parse
 
 logger = logging.getLogger(__name__)
+
+# Track errors so the pipeline can include them in diagnostics
+_recent_errors: list[str] = []
+
+# Models to try in order of preference
+_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
 
 
 def gemini_available() -> bool:
@@ -17,6 +24,65 @@ def gemini_available() -> bool:
     else:
         logger.info("GEMINI_API_KEY configurada (%s...)", key[:8])
     return bool(key)
+
+
+def get_recent_errors() -> list[str]:
+    """Return and clear recent Gemini errors for diagnostics."""
+    errors = list(_recent_errors)
+    _recent_errors.clear()
+    return errors
+
+
+def test_gemini() -> dict:
+    """Test Gemini API connectivity. Returns status dict."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return {"ok": False, "error": "GEMINI_API_KEY não configurada"}
+
+    for model in _MODELS:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{model}:generateContent?key={api_key}"
+        )
+        body = json.dumps({
+            "contents": [{"parts": [{"text": "Responda apenas: OK"}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 10},
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            candidates = data.get("candidates", [])
+            if candidates:
+                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                return {"ok": True, "model": model, "response": text.strip()}
+        except urllib.error.HTTPError as exc:
+            error_body = ""
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+            # Try to extract the actual error message
+            err_msg = f"HTTP {exc.code}"
+            try:
+                err_data = json.loads(error_body)
+                err_msg = err_data.get("error", {}).get("message", err_msg)
+            except Exception:
+                err_msg = f"HTTP {exc.code}: {error_body[:150]}"
+            # If it's a model-not-found error, try next model
+            if exc.code == 404:
+                logger.info("Modelo %s não encontrado, tentando próximo...", model)
+                continue
+            return {"ok": False, "model": model, "error": err_msg}
+        except Exception as exc:
+            return {"ok": False, "model": model, "error": str(exc)}
+
+    return {"ok": False, "error": "Nenhum modelo Gemini disponível"}
 
 
 def research_participant(name: str, channel_name: str) -> dict:
@@ -192,13 +258,40 @@ def generate_topics_ai(
 # Internal
 # ---------------------------------------------------------------------------
 
-def _call_gemini(prompt: str, model: str = "gemini-2.0-flash") -> str:
-    """Call Gemini API and return the text response."""
+# Cache the working model name so we don't retry 404s every call
+_working_model: str | None = None
+
+
+def _call_gemini(prompt: str) -> str:
+    """Call Gemini API and return the text response.
+
+    Tries multiple models if the primary one returns 404.
+    """
+    global _working_model
+
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         logger.warning("_call_gemini: sem API key, pulando")
         return ""
 
+    # If we already found a working model, use it directly
+    models_to_try = [_working_model] if _working_model else _MODELS
+
+    for model in models_to_try:
+        result = _call_gemini_single(prompt, model, api_key)
+        if result is not None:
+            _working_model = model
+            return result
+        # result is None means 404 (model not found), try next
+
+    return ""
+
+
+def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
+    """Call a specific Gemini model.
+
+    Returns the text response, "" on API error, or None if model not found (404).
+    """
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
         f"models/{model}:generateContent?key={api_key}"
@@ -229,14 +322,18 @@ def _call_gemini(prompt: str, model: str = "gemini-2.0-flash") -> str:
             data = json.loads(raw)
         candidates = data.get("candidates", [])
         if not candidates:
-            logger.error("Gemini retornou sem candidates: %s", json.dumps(data, ensure_ascii=False)[:500])
+            err = f"Gemini ({model}) retornou sem candidates: {json.dumps(data, ensure_ascii=False)[:300]}"
+            logger.error(err)
+            _recent_errors.append(err)
             return ""
         parts = candidates[0].get("content", {}).get("parts", [])
         if not parts:
-            logger.error("Gemini retornou candidates sem parts: %s", json.dumps(candidates[0], ensure_ascii=False)[:500])
+            err = f"Gemini ({model}) candidates sem parts"
+            logger.error(err)
+            _recent_errors.append(err)
             return ""
         text = parts[0].get("text", "")
-        logger.info("Gemini respondeu OK (%d chars): %.120s...", len(text), text)
+        logger.info("Gemini (%s) respondeu OK (%d chars): %.120s...", model, len(text), text)
         return text
     except urllib.error.HTTPError as exc:
         error_body = ""
@@ -244,10 +341,30 @@ def _call_gemini(prompt: str, model: str = "gemini-2.0-flash") -> str:
             error_body = exc.read().decode("utf-8", errors="replace")[:500]
         except Exception:
             pass
-        logger.error("Gemini HTTP %d: %s — %s", exc.code, exc.reason, error_body)
+
+        # Parse error message from JSON response
+        err_detail = f"HTTP {exc.code}: {exc.reason}"
+        try:
+            err_data = json.loads(error_body)
+            err_detail = err_data.get("error", {}).get("message", err_detail)
+        except Exception:
+            if error_body:
+                err_detail = f"HTTP {exc.code}: {error_body[:200]}"
+
+        if exc.code == 404:
+            logger.info("Modelo %s não encontrado (404), tentando próximo", model)
+            return None  # Signal to try next model
+
+        err = f"Gemini ({model}) {err_detail}"
+        logger.error(err)
+        _recent_errors.append(err)
     except urllib.error.URLError as exc:
-        logger.error("Gemini URLError (rede?): %s", exc.reason)
+        err = f"Gemini ({model}) URLError: {exc.reason}"
+        logger.error(err)
+        _recent_errors.append(err)
     except Exception as exc:
-        logger.error("Gemini erro inesperado: %s", exc)
+        err = f"Gemini ({model}) erro: {exc}"
+        logger.error(err)
+        _recent_errors.append(err)
 
     return ""

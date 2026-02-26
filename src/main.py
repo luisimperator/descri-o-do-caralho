@@ -25,6 +25,7 @@ from .content import (
 from .template import render_description
 from .ai import (
     gemini_available,
+    get_recent_errors,
     research_participant,
     generate_chapter_titles,
     generate_summary_ai,
@@ -257,6 +258,11 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         social_links=social_links,
         asr_generated=video.asr_generated,
     )
+
+    # Collect actual Gemini API errors for diagnostics
+    gemini_errors = get_recent_errors()
+    if gemini_errors:
+        diagnostics["gemini_errors"] = gemini_errors
 
     logger.info("Pipeline concluído: %s", json.dumps(diagnostics, ensure_ascii=False))
 

@@ -9,7 +9,7 @@ import uuid
 from flask import Flask, render_template, request, jsonify
 
 from .main import run_pipeline
-from .ai import gemini_available
+from .ai import gemini_available, test_gemini
 
 # Configure logging to stderr so Railway shows it
 logging.basicConfig(
@@ -34,13 +34,21 @@ def api_health():
     """Health check showing configuration status."""
     yt_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    return jsonify({
+
+    result = {
         "status": "ok",
         "youtube_api": bool(yt_key),
         "youtube_api_prefix": yt_key[:8] + "..." if yt_key else None,
         "gemini_api": bool(gemini_key),
         "gemini_api_prefix": gemini_key[:8] + "..." if gemini_key else None,
-    })
+    }
+
+    # Test Gemini connectivity if key is configured
+    if gemini_key:
+        gemini_test = test_gemini()
+        result["gemini_test"] = gemini_test
+
+    return jsonify(result)
 
 
 @app.route("/api/generate", methods=["POST"])

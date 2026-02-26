@@ -198,21 +198,51 @@ def _timestamp_to_seconds(ts: str) -> int:
 def _fetch_transcript_api(video_id: str) -> tuple[str, bool]:
     """Fetch transcript using youtube-transcript-api.
 
+    Tries multiple language combinations and falls back to listing
+    available transcripts.
+
     Returns (transcript_text, asr_generated).
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
-        # Try manual subtitles first (Portuguese, then English)
         ytt_api = YouTubeTranscriptApi()
-        transcript_list = ytt_api.fetch(video_id, languages=["pt", "pt-BR", "en"])
-        text = " ".join(
-            snippet.text for snippet in transcript_list.snippets
-        )
-        logger.info("Transcrição obtida: %d chars (idiomas: pt/pt-BR/en)", len(text))
-        # youtube-transcript-api doesn't easily distinguish manual vs auto
-        # Assume auto-generated if fetched successfully
-        return text, True
+
+        # Try 1: Manual subtitles in preferred languages
+        for langs in [["pt", "pt-BR", "en"], ["pt", "en"], ["es", "en"]]:
+            try:
+                transcript_list = ytt_api.fetch(video_id, languages=langs)
+                text = " ".join(
+                    snippet.text for snippet in transcript_list.snippets
+                )
+                if text.strip():
+                    logger.info("Transcrição obtida: %d chars (idiomas: %s)", len(text), langs)
+                    return text, False
+            except Exception:
+                continue
+
+        # Try 2: List all available transcripts and pick the best one
+        try:
+            transcript_list = ytt_api.list(video_id)
+            # Try manual transcripts first
+            for t in transcript_list:
+                try:
+                    fetched = ytt_api.fetch(video_id, languages=[t.language_code])
+                    text = " ".join(snippet.text for snippet in fetched.snippets)
+                    if text.strip():
+                        logger.info("Transcrição obtida: %d chars (idioma: %s, auto: %s)",
+                                    len(text), t.language_code, t.is_generated)
+                        return text, t.is_generated
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("Falha ao listar transcrições para %s: %s", video_id, exc)
+
+        logger.warning("Nenhuma transcrição disponível para %s", video_id)
+        return "", False
+    except ImportError:
+        logger.error("youtube-transcript-api não instalado")
+        return "", False
     except Exception as exc:
         logger.warning("Falha ao obter transcrição para %s: %s", video_id, exc)
         return "", False
