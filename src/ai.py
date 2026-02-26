@@ -1,11 +1,16 @@
-"""Gemini AI integration for research and content generation."""
+"""Gemini AI integration for research and content generation.
+
+Optimised for the free tier: a SINGLE API call generates all content
+(summary, topics, chapters, participant bios) to stay well within
+the 15 req/min and 1 500 req/day limits.
+"""
 
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
-import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +19,9 @@ _recent_errors: list[str] = []
 
 # Models to try in order of preference
 _MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+
+# Cache the working model name so we don't retry 404s every call
+_working_model: str | None = None
 
 
 def gemini_available() -> bool:
@@ -33,237 +41,143 @@ def get_recent_errors() -> list[str]:
     return errors
 
 
-def test_gemini() -> dict:
-    """Test Gemini API connectivity. Returns status dict."""
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        return {"ok": False, "error": "GEMINI_API_KEY não configurada"}
+def generate_all_content(
+    title: str,
+    description: str,
+    transcript: str,
+    participant_names: list[str],
+    existing_chapters: list[dict],
+    duration: int,
+    channel_name: str,
+) -> dict:
+    """Generate ALL AI content in a SINGLE Gemini call.
 
-    for model in _MODELS:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{model}:generateContent?key={api_key}"
-        )
-        body = json.dumps({
-            "contents": [{"parts": [{"text": "Responda apenas: OK"}]}],
-            "generationConfig": {"temperature": 0, "maxOutputTokens": 10},
-        }).encode("utf-8")
+    Returns a dict with keys:
+      - summary: str (1-2 sentences)
+      - topics: list[str] (4-6 topics)
+      - chapters: list[dict] (with start/title)
+      - participants: list[dict] (with name/role/bio)
 
-        req = urllib.request.Request(
-            url, data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            candidates = data.get("candidates", [])
-            if candidates:
-                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                return {"ok": True, "model": model, "response": text.strip()}
-        except urllib.error.HTTPError as exc:
-            error_body = ""
-            try:
-                error_body = exc.read().decode("utf-8", errors="replace")[:300]
-            except Exception:
-                pass
-            # Try to extract the actual error message
-            err_msg = f"HTTP {exc.code}"
-            try:
-                err_data = json.loads(error_body)
-                err_msg = err_data.get("error", {}).get("message", err_msg)
-            except Exception:
-                err_msg = f"HTTP {exc.code}: {error_body[:150]}"
-            # If it's a model-not-found error, try next model
-            if exc.code == 404:
-                logger.info("Modelo %s não encontrado, tentando próximo...", model)
-                continue
-            return {"ok": False, "model": model, "error": err_msg}
-        except Exception as exc:
-            return {"ok": False, "model": model, "error": str(exc)}
-
-    return {"ok": False, "error": "Nenhum modelo Gemini disponível"}
-
-
-def research_participant(name: str, channel_name: str) -> dict:
-    """Research a participant using Gemini to find their role and bio.
-
-    Returns {"role": "...", "bio": "..."}.
+    Any missing key means that part failed → use heuristic fallback.
     """
-    prompt = (
-        f"Pesquise sobre '{name}' que participou do canal/podcast '{channel_name}' no YouTube.\n"
-        f"Responda APENAS em JSON com este formato exato:\n"
-        f'{{"role": "cargo profissional em 1-2 palavras", "bio": "resumo profissional em até 15 palavras"}}\n'
-        f"Se não encontrar informações específicas, use:\n"
-        f'{{"role": "Profissional", "bio": "Participante do programa {channel_name}"}}\n'
-        f"Responda APENAS o JSON, sem markdown, sem explicação."
-    )
+    transcript_sample = transcript[:4000] if transcript else ""
+    names = ", ".join(participant_names) if participant_names else "os participantes"
+    duration_min = duration // 60
+
+    # Build chapters context
+    chapters_ctx = ""
+    if existing_chapters:
+        chapters_ctx = (
+            "Capítulos atuais (melhore os títulos, mantenha timestamps):\n"
+            + "\n".join(f"{ch['start']}s - {ch['title']}" for ch in existing_chapters)
+        )
+    elif transcript_sample:
+        chapters_ctx = (
+            f"Não há capítulos. Crie entre 5 e 10 com timestamps espaçados "
+            f"para um vídeo de {duration_min} minutos. "
+            f"Primeiro: 0s (Introdução), último: Conclusão."
+        )
+
+    # Build participants context
+    participants_ctx = ""
+    if participant_names:
+        participants_ctx = (
+            "Para cada participante, descubra o cargo profissional (1-2 palavras) "
+            "e uma bio curta (até 15 palavras). "
+            "Se não souber, use role='Profissional' e bio='Participante do programa'.\n"
+            f"Participantes: {names}"
+        )
+
+    prompt = f"""Você é um assistente que gera metadados para vídeos de podcast no YouTube.
+Podcast: '{title}'
+Canal: '{channel_name}'
+Duração: {duration_min} minutos
+Descrição original: {description[:500]}
+Trecho da transcrição: {transcript_sample}
+
+Gere TUDO abaixo em um ÚNICO JSON:
+
+1. "summary": resumo de 1-2 frases (máx 40 palavras) do conteúdo do episódio.
+   Será usado depois de "No episódio de hoje, {names} exploram ..."
+   NÃO inclua nomes dos participantes.
+
+2. "topics": array de 4-6 tópicos principais (cada um com 3-8 palavras).
+
+3. "chapters": array de objetos {{"start": segundos, "title": "título descritivo"}}.
+   {chapters_ctx}
+
+4. "participants": array de objetos {{"name": "nome", "role": "cargo", "bio": "bio curta"}}.
+   {participants_ctx}
+
+Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
+
     result = _call_gemini(prompt)
     if not result:
-        return {"role": "", "bio": "Participante do programa"}
+        return {}
 
     try:
-        # Try to parse JSON from response
         clean = result.strip()
         # Remove markdown code block if present
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         data = json.loads(clean)
-        return {
-            "role": data.get("role", ""),
-            "bio": data.get("bio", "Participante do programa"),
-        }
-    except (json.JSONDecodeError, KeyError):
-        return {"role": "", "bio": "Participante do programa"}
+        if not isinstance(data, dict):
+            return {}
 
+        parsed: dict = {}
 
-def generate_chapter_titles(
-    transcript: str,
-    title: str,
-    duration: int,
-    existing_chapters: list[dict],
-) -> list[dict]:
-    """Use Gemini to generate meaningful chapter titles from transcript.
+        # Summary
+        if data.get("summary"):
+            s = str(data["summary"]).strip().strip('"').strip("'")
+            words = s.split()
+            if len(words) > 50:
+                s = " ".join(words[:50]) + "."
+            parsed["summary"] = s
 
-    If existing_chapters have timestamps, keeps them and improves titles.
-    Otherwise generates chapters with timestamps.
-    """
-    if not transcript:
-        return existing_chapters
+        # Topics
+        if isinstance(data.get("topics"), list) and data["topics"]:
+            parsed["topics"] = [str(t) for t in data["topics"][:6]]
 
-    # Truncate transcript to ~4000 chars for the API
-    transcript_sample = transcript[:4000]
-    duration_min = duration // 60
-
-    if existing_chapters:
-        # Improve existing chapter titles
-        chapters_text = "\n".join(
-            f"{ch['start']}s - {ch['title']}" for ch in existing_chapters
-        )
-        prompt = (
-            f"Este é um podcast chamado '{title}' com {duration_min} minutos.\n"
-            f"Capítulos atuais:\n{chapters_text}\n\n"
-            f"Trecho da transcrição:\n{transcript_sample}\n\n"
-            f"Melhore os títulos dos capítulos para serem mais descritivos. "
-            f"Mantenha os mesmos timestamps. "
-            f"Responda APENAS em JSON array com este formato:\n"
-            f'[{{"start": 0, "title": "Introdução"}}, {{"start": 240, "title": "Título descritivo"}}]\n'
-            f"Responda APENAS o JSON array, sem markdown, sem explicação."
-        )
-    else:
-        # Generate chapters from scratch
-        prompt = (
-            f"Este é um podcast chamado '{title}' com {duration_min} minutos.\n"
-            f"Trecho da transcrição:\n{transcript_sample}\n\n"
-            f"Crie capítulos para este vídeo com timestamps e títulos descritivos. "
-            f"O primeiro capítulo deve ser 0s (Introdução) e o último deve ser a Conclusão. "
-            f"Crie entre 5 e 10 capítulos espaçados uniformemente.\n"
-            f"Responda APENAS em JSON array com este formato:\n"
-            f'[{{"start": 0, "title": "Introdução"}}, {{"start": 240, "title": "Título descritivo"}}]\n'
-            f"Responda APENAS o JSON array, sem markdown, sem explicação."
-        )
-
-    result = _call_gemini(prompt)
-    if not result:
-        return existing_chapters
-
-    try:
-        clean = result.strip()
-        if clean.startswith("```"):
-            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        chapters = json.loads(clean)
-        if isinstance(chapters, list) and chapters:
-            return [
-                {"start": int(ch.get("start", 0)), "title": ch.get("title", "")}
-                for ch in chapters
+        # Chapters
+        if isinstance(data.get("chapters"), list) and data["chapters"]:
+            parsed["chapters"] = [
+                {"start": int(ch.get("start", 0)), "title": str(ch.get("title", ""))}
+                for ch in data["chapters"]
                 if isinstance(ch, dict)
             ]
-    except (json.JSONDecodeError, KeyError, ValueError):
-        pass
 
-    return existing_chapters
+        # Participants
+        if isinstance(data.get("participants"), list) and data["participants"]:
+            parsed["participants"] = [
+                {
+                    "name": str(p.get("name", "")),
+                    "role": str(p.get("role", "")),
+                    "bio": str(p.get("bio", "Participante do programa")),
+                }
+                for p in data["participants"]
+                if isinstance(p, dict)
+            ]
 
+        logger.info("generate_all_content OK: keys=%s", list(parsed.keys()))
+        return parsed
 
-def generate_summary_ai(
-    title: str,
-    description: str,
-    transcript: str,
-    participant_names: list[str],
-) -> str:
-    """Use Gemini to generate a clean intro summary."""
-    transcript_sample = transcript[:2000] if transcript else ""
-    names = ", ".join(participant_names) if participant_names else "os participantes"
-
-    prompt = (
-        f"Podcast: '{title}'\n"
-        f"Participantes: {names}\n"
-        f"Descrição original: {description[:500]}\n"
-        f"Trecho da transcrição: {transcript_sample}\n\n"
-        f"Escreva um resumo de 1-2 frases (máximo 40 palavras) descrevendo "
-        f"o conteúdo do episódio. O resumo vai ser usado depois de "
-        f"'No episódio de hoje, {names} exploram ...'\n"
-        f"Não inclua nomes dos participantes no resumo.\n"
-        f"Responda APENAS o texto do resumo, sem aspas, sem explicação."
-    )
-
-    result = _call_gemini(prompt)
-    if result:
-        # Clean up: remove quotes, limit length
-        clean = result.strip().strip('"').strip("'")
-        words = clean.split()
-        if len(words) > 50:
-            clean = " ".join(words[:50]) + "."
-        return clean
-
-    return ""
-
-
-def generate_topics_ai(
-    title: str,
-    description: str,
-    transcript: str,
-) -> list[str]:
-    """Use Gemini to extract main discussion topics."""
-    transcript_sample = transcript[:2000] if transcript else ""
-
-    prompt = (
-        f"Podcast: '{title}'\n"
-        f"Descrição: {description[:500]}\n"
-        f"Trecho da transcrição: {transcript_sample}\n\n"
-        f"Liste de 4 a 6 tópicos principais abordados neste episódio.\n"
-        f"Cada tópico deve ter 3-8 palavras.\n"
-        f"Responda APENAS em JSON array de strings:\n"
-        f'["Tópico 1", "Tópico 2", "Tópico 3", "Tópico 4"]\n'
-        f"Responda APENAS o JSON array, sem markdown, sem explicação."
-    )
-
-    result = _call_gemini(prompt)
-    if not result:
-        return []
-
-    try:
-        clean = result.strip()
-        if clean.startswith("```"):
-            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        topics = json.loads(clean)
-        if isinstance(topics, list):
-            return [str(t) for t in topics[:6]]
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    return []
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        err = f"Falha ao parsear resposta do Gemini: {exc}"
+        logger.error(err)
+        _recent_errors.append(err)
+        return {}
 
 
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
 
-# Cache the working model name so we don't retry 404s every call
-_working_model: str | None = None
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [5, 15, 30]  # seconds to wait on 429
 
 
 def _call_gemini(prompt: str) -> str:
-    """Call Gemini API and return the text response.
+    """Call Gemini API with retry on rate limits (429).
 
     Tries multiple models if the primary one returns 404.
     """
@@ -274,11 +188,10 @@ def _call_gemini(prompt: str) -> str:
         logger.warning("_call_gemini: sem API key, pulando")
         return ""
 
-    # If we already found a working model, use it directly
     models_to_try = [_working_model] if _working_model else _MODELS
 
     for model in models_to_try:
-        result = _call_gemini_single(prompt, model, api_key)
+        result = _call_with_retry(prompt, model, api_key)
         if result is not None:
             _working_model = model
             return result
@@ -287,10 +200,52 @@ def _call_gemini(prompt: str) -> str:
     return ""
 
 
-def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
-    """Call a specific Gemini model.
+def _call_with_retry(prompt: str, model: str, api_key: str) -> str | None:
+    """Call Gemini with automatic retry on 429 rate limit.
 
-    Returns the text response, "" on API error, or None if model not found (404).
+    Returns text, "" on error, or None if 404 (try next model).
+    """
+    for attempt in range(_MAX_RETRIES + 1):
+        result = _call_gemini_single(prompt, model, api_key)
+
+        # None = 404 model not found → bubble up to try next model
+        if result is None:
+            return None
+
+        # _RATE_LIMITED sentinel: wait and retry
+        if result == _RATE_LIMITED:
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF[attempt]
+                logger.info("Rate limited (429). Aguardando %ds antes de tentar novamente (%d/%d)...",
+                            wait, attempt + 1, _MAX_RETRIES)
+                time.sleep(wait)
+                continue
+            else:
+                logger.error("Rate limit persistente após %d tentativas", _MAX_RETRIES + 1)
+                _recent_errors.append(
+                    f"Gemini rate limit (429) — tentou {_MAX_RETRIES + 1}x. "
+                    f"Aguarde 1 minuto e tente novamente."
+                )
+                return ""
+
+        # Normal result (could be "" on other errors, or actual text)
+        return result
+
+    return ""
+
+
+# Sentinel value for rate limit
+_RATE_LIMITED = "__RATE_LIMITED__"
+
+
+def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
+    """Call a specific Gemini model once.
+
+    Returns:
+      - text response on success
+      - "" on non-retryable error
+      - None if 404 (model not found)
+      - _RATE_LIMITED if 429
     """
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
@@ -303,7 +258,7 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
         }],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 2048,
         }
     }).encode("utf-8")
 
@@ -317,7 +272,7 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
     logger.info("Chamando Gemini (%s) — prompt: %.80s...", model, prompt)
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8")
             data = json.loads(raw)
         candidates = data.get("candidates", [])
@@ -333,7 +288,7 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
             _recent_errors.append(err)
             return ""
         text = parts[0].get("text", "")
-        logger.info("Gemini (%s) respondeu OK (%d chars): %.120s...", model, len(text), text)
+        logger.info("Gemini (%s) respondeu OK (%d chars)", model, len(text))
         return text
     except urllib.error.HTTPError as exc:
         error_body = ""
@@ -342,7 +297,6 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
         except Exception:
             pass
 
-        # Parse error message from JSON response
         err_detail = f"HTTP {exc.code}: {exc.reason}"
         try:
             err_data = json.loads(error_body)
@@ -353,7 +307,11 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
 
         if exc.code == 404:
             logger.info("Modelo %s não encontrado (404), tentando próximo", model)
-            return None  # Signal to try next model
+            return None
+
+        if exc.code == 429:
+            logger.warning("Gemini rate limit (429): %s", err_detail)
+            return _RATE_LIMITED
 
         err = f"Gemini ({model}) {err_detail}"
         logger.error(err)

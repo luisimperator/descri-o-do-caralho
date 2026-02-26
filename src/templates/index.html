@@ -119,12 +119,7 @@ let pollTimer = null;
       parts.push('<span class="config-fail">YouTube API NAO CONFIGURADA</span>');
     }
     if (data.gemini_api) {
-      const gt = data.gemini_test || {};
-      if (gt.ok) {
-        parts.push('<span class="config-ok">Gemini AI OK (modelo: ' + escapeHtml(gt.model || '?') + ')</span>');
-      } else {
-        parts.push('<span class="config-fail">Gemini AI ERRO: ' + escapeHtml(gt.error || 'desconhecido') + '</span>');
-      }
+      parts.push('<span class="config-ok">Gemini AI configurada</span>');
     } else {
       parts.push('<span class="config-fail">Gemini AI NAO CONFIGURADA</span>');
     }
