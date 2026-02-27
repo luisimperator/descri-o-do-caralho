@@ -198,26 +198,23 @@ def generate_mini_bio(
     channel_name: str,
     description: str = "",
 ) -> tuple[str, str]:
-    """Create an 8-12 word mini-biography.
+    """Create an 8-12 word mini-biography via Google search.
 
-    Tries in order:
-      1. YouTube Search API (uses YOUTUBE_API_KEY — already configured!)
-      2. DuckDuckGo web search
-      3. Extract from video description (no internet needed)
-      4. Google web search (often blocked from servers)
+    Uses Google Custom Search JSON API (GOOGLE_CSE_ID + GOOGLE_API_KEY).
+    Falls back to DuckDuckGo and description parsing if not configured.
 
     Returns (role, bio). Falls back to defaults on failure.
     """
-    # 1. YouTube Search API — most reliable from servers
-    snippet = _search_youtube_api(name, channel_name)
+    # 1. Google Custom Search API (official, works from servers)
+    snippet = _search_google_api(f"{name} {channel_name}")
     if snippet:
         role = _extract_role(snippet)
         bio = _summarise_snippet(snippet, max_words=12)
         if role or bio:
-            logger.info("YouTube API bio for '%s': role=%s", name, role)
+            logger.info("Google API bio for '%s': role=%s", name, role)
             return role, bio or "Participante do programa"
 
-    # 2. DuckDuckGo web search
+    # 2. DuckDuckGo web search (fallback, no API key)
     snippet = _search_duckduckgo(f"{name} {channel_name}")
     if snippet:
         role = _extract_role(snippet)
@@ -230,14 +227,6 @@ def generate_mini_bio(
     if description:
         role, bio = extract_role_from_description(name, description)
         if role:
-            return role, bio or "Participante do programa"
-
-    # 4. Google (last resort, usually blocked)
-    snippet = _search_google(f"{name} {channel_name}")
-    if snippet:
-        role = _extract_role(snippet)
-        bio = _summarise_snippet(snippet, max_words=12)
-        if role or bio:
             return role, bio or "Participante do programa"
 
     return "", "Participante do programa"
@@ -414,16 +403,10 @@ def _pick_ocr_spelling(name: str, ocr_text: str) -> str | None:
 
 
 def _google_canonise(name: str, context: str) -> str | None:
-    """Search for the canonical spelling of a name.
-
-    Tries YouTube API first (works from servers), then DDG, then Google.
-    """
-    # Try YouTube Search first (most reliable from Railway)
-    snippet = _search_youtube_api(name, context)
+    """Search Google for the canonical spelling of a name."""
+    snippet = _search_google_api(f"{name} {context}")
     if not snippet:
         snippet = _search_duckduckgo(f"{name} {context}")
-    if not snippet:
-        snippet = _search_google(f"{name} {context}")
     if not snippet:
         return None
 
@@ -435,29 +418,36 @@ def _google_canonise(name: str, context: str) -> str | None:
     return name  # Confirmed existence, keep original spelling
 
 
-def _search_youtube_api(name: str, channel_name: str) -> str:
-    """Search YouTube for a person using the YouTube Data API v3.
+def _search_google_api(query: str) -> str:
+    """Search Google via Custom Search JSON API.
 
-    Uses the YOUTUBE_API_KEY already configured. Searches for the person's
-    name + channel name and extracts text from video titles and descriptions.
-    This is the most reliable search from Railway since the YouTube API works.
+    Requires two env vars:
+      - GOOGLE_API_KEY: API key with Custom Search API enabled
+      - GOOGLE_CSE_ID:  Programmable Search Engine ID (cx)
 
-    Costs 100 quota units per search call (daily limit: 10 000 units).
+    Free tier: 100 queries/day. Works from any server, no captcha.
+
+    Setup:
+      1. console.cloud.google.com → enable "Custom Search API"
+      2. programmablesearchengine.google.com → create engine → "Search the entire web"
+      3. Copy the Search engine ID → set as GOOGLE_CSE_ID in Railway
+      4. Set GOOGLE_API_KEY (can be the same as YOUTUBE_API_KEY if Custom Search is enabled)
     """
-    api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
-    if not api_key:
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    cse_id = os.environ.get("GOOGLE_CSE_ID", "").strip()
+
+    if not api_key or not cse_id:
+        logger.debug("Google Custom Search: GOOGLE_API_KEY ou GOOGLE_CSE_ID não configurados")
         return ""
 
-    query = f"{name} {channel_name}"
     params = urllib.parse.urlencode({
-        "part": "snippet",
-        "q": query,
-        "type": "video",
-        "maxResults": "5",
-        "relevanceLanguage": "pt",
         "key": api_key,
+        "cx": cse_id,
+        "q": query,
+        "num": "5",
+        "lr": "lang_pt",
     })
-    url = f"https://www.googleapis.com/youtube/v3/search?{params}"
+    url = f"https://www.googleapis.com/customsearch/v1?{params}"
 
     req = urllib.request.Request(url)
 
@@ -467,27 +457,35 @@ def _search_youtube_api(name: str, channel_name: str) -> str:
 
         items = data.get("items", [])
         if not items:
-            logger.debug("YouTube Search: sem resultados para '%s'", query)
+            logger.debug("Google API: sem resultados para '%s'", query)
             return ""
 
-        # Combine titles and descriptions from results
+        # Combine titles and snippets from results
         texts = []
         for item in items:
-            snippet = item.get("snippet", {})
-            title = snippet.get("title", "")
-            desc = snippet.get("description", "")
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
             if title:
                 texts.append(title)
-            if desc:
-                texts.append(desc)
+            if snippet:
+                texts.append(snippet)
 
         result = " ".join(texts)
-        logger.info("YouTube Search OK para '%s': %d chars de %d resultados",
-                     name, len(result), len(items))
+        logger.info("Google API OK para '%s': %d chars de %d resultados",
+                     query, len(result), len(items))
         return result[:3000]
 
+    except urllib.error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        logger.warning("Google API falhou para '%s': HTTP %d — %s",
+                        query, exc.code, error_body[:150])
+        return ""
     except Exception as exc:
-        logger.warning("YouTube Search falhou para '%s': %s", name, exc)
+        logger.warning("Google API falhou para '%s': %s", query, exc)
         return ""
 
 
@@ -542,34 +540,6 @@ def _search_duckduckgo(query: str) -> str:
         return ""
 
 
-def _search_google(query: str) -> str:
-    """Search Google. Often blocked from datacenter IPs (captcha)."""
-    encoded = urllib.parse.quote_plus(query)
-    url = f"https://www.google.com/search?q={encoded}&hl=pt-BR"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"\s+", " ", text)
-        text = text[:2000]
-
-        if _is_blocked_response(text):
-            logger.debug("Google bloqueou busca para '%s'", query)
-            return ""
-
-        return text
-    except Exception:
-        return ""
 
 
 def _summarise_snippet(snippet: str, max_words: int = 12) -> str:

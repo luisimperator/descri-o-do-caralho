@@ -33,12 +33,15 @@ def index():
 def api_health():
     """Health check showing configuration status."""
     yt_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
+    google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    google_cse = os.environ.get("GOOGLE_CSE_ID", "").strip()
     ai_status = get_ai_status()
 
     result = {
         "status": "ok",
         "youtube_api": bool(yt_key),
         "youtube_api_prefix": yt_key[:8] + "..." if yt_key else None,
+        "google_search": bool(google_key and google_cse),
         "ai": ai_status,
     }
 

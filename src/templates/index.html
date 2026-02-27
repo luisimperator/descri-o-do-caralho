@@ -118,15 +118,17 @@ let pollTimer = null;
     } else {
       parts.push('<span class="config-fail">YouTube API NAO CONFIGURADA</span>');
     }
+    if (data.google_search) {
+      parts.push('<span class="config-ok">Google Search OK</span>');
+    } else {
+      parts.push('<span class="config-fail">Google Search NAO CONFIGURADO (GOOGLE_API_KEY + GOOGLE_CSE_ID)</span>');
+    }
     const ai = data.ai || {};
     if (ai.openrouter) {
       parts.push('<span class="config-ok">OpenRouter AI OK</span>');
     }
     if (ai.gemini) {
       parts.push('<span class="config-ok">Gemini AI OK</span>');
-    }
-    if (!ai.openrouter && !ai.gemini) {
-      parts.push('<span class="config-fail">IA NAO CONFIGURADA (OPENROUTER_API_KEY ou GEMINI_API_KEY)</span>');
     }
     el.innerHTML = parts.join(' &bull; ');
   }).catch(() => {});
