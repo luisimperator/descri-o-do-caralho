@@ -1,11 +1,14 @@
 """Name candidate extraction, validation and canonisation."""
 
+import logging
 import re
 import urllib.parse
 import urllib.request
 import json
 from collections import Counter
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -133,21 +136,91 @@ def validate_and_canonise(
     return validated
 
 
-def generate_mini_bio(name: str, channel_name: str) -> tuple[str, str]:
-    """Create an 8-12 word mini-biography via web search snippets.
+def extract_role_from_description(name: str, description: str) -> tuple[str, str]:
+    """Try to extract a participant's role from the video description.
 
-    Returns (role, bio). Falls back to defaults on ambiguity.
+    Looks for patterns like:
+      - "João Manoel, Advogado"
+      - "João Manoel - Advogado e Árbitro"
+      - "Advogado João Manoel"
+      - "João Manoel (Advogado)"
+      - "João Manoel | Advogado"
+
+    Returns (role, bio) or ("", "") if nothing found.
     """
+    if not description or not name:
+        return "", ""
+
+    first_name = name.split()[0]
+    last_name = name.split()[-1] if len(name.split()) > 1 else ""
+    name_esc = re.escape(name)
+    first_esc = re.escape(first_name)
+
+    # Build role alternatives
+    role_alts = "|".join(re.escape(r) for r in _ROLE_KEYWORDS)
+    role_re = r"(?:" + role_alts + r")[a-zà-ü]*"
+
+    patterns = [
+        # "Name, Role context" / "Name - Role context" / "Name | Role"
+        name_esc + r"\s*[,\-–—\|:]\s*(" + role_re + r"(?:\s+[^.\n,]{2,40})?)",
+        # "Name (Role context)"
+        name_esc + r"\s*\(\s*(" + role_re + r"[^)]{0,40})\)",
+        # "Role Name" (e.g. "Advogado João Manoel")
+        r"(" + role_re + r")\s+" + name_esc,
+        # "Role em/de/... Name" (e.g. "especialista em mediação Ana Rocha")
+        r"(" + role_re + r"(?:\s+(?:em|de|do|da|no|na|dos|das|para)\s+[a-zà-üA-ZÀ-Ü]+){0,3})\s+" + name_esc,
+        # First name variants: "João, Advogado"
+        first_esc + r"\s*[,\-–—\|:]\s*(" + role_re + r"(?:\s+[^.\n,]{2,30})?)",
+        # "Role FirstName"
+        r"(" + role_re + r")\s+" + first_esc,
+        # "Role em/de/... FirstName"
+        r"(" + role_re + r"(?:\s+(?:em|de|do|da|no|na|dos|das|para)\s+[a-zà-üA-ZÀ-Ü]+){0,3})\s+" + first_esc,
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, description, re.IGNORECASE)
+        if m:
+            match_text = m.group(1).strip()
+            role = _extract_role(match_text) or match_text.split()[0].capitalize()
+            bio = match_text if len(match_text.split()) > 1 else ""
+            words = bio.split()[:12]
+            bio = " ".join(words) if words else ""
+            logger.info("Role from description for '%s': role=%s, bio=%s",
+                        name, role, bio)
+            return role, bio
+
+    return "", ""
+
+
+def generate_mini_bio(
+    name: str,
+    channel_name: str,
+    description: str = "",
+) -> tuple[str, str]:
+    """Create an 8-12 word mini-biography.
+
+    Tries in order:
+      1. Extract from video description (no internet needed)
+      2. DuckDuckGo web search
+      3. Google web search (often blocked from servers)
+
+    Returns (role, bio). Falls back to defaults on failure.
+    """
+    # 1. Try extracting from description
+    if description:
+        role, bio = extract_role_from_description(name, description)
+        if role:
+            return role, bio or "Participante do programa"
+
+    # 2. Web search (DDG -> Google)
     snippet = _search_snippet(f"{name} {channel_name}")
-    if not snippet:
-        return "", "Participante do programa"
+    if snippet:
+        role = _extract_role(snippet)
+        bio = _summarise_snippet(snippet, max_words=12)
+        if role or bio:
+            return role, bio or "Participante do programa"
 
-    role = _extract_role(snippet)
-    bio = _summarise_snippet(snippet, max_words=12)
-    if not bio:
-        bio = "Participante do programa"
-
-    return role, bio
+    return "", "Participante do programa"
 
 
 # ---------------------------------------------------------------------------
@@ -157,17 +230,59 @@ def generate_mini_bio(name: str, channel_name: str) -> tuple[str, str]:
 _NAME_PATTERN = re.compile(r"\b(?:[A-ZÀ-Ü][a-zà-ü]+(?:\s+|$)){2,5}")
 
 _ROLE_KEYWORDS = [
-    "economista", "empresário", "empresária", "jornalista", "médico", "médica",
-    "advogado", "advogada", "professor", "professora", "atleta",
-    "influenciador", "influenciadora", "apresentador", "apresentadora",
-    "comediante", "escritor", "escritora", "analista", "trader",
-    "investidor", "investidora", "político", "política", "engenheiro",
-    "engenheira", "cientista", "pesquisador", "pesquisadora", "youtuber",
-    "streamer", "fundador", "fundadora", "consultor", "consultora",
-    "diretor", "diretora", "produtor", "produtora", "músico",
-    "cantor", "cantora", "filósofo", "filósofa",
-    "psicólogo", "psicóloga", "historiador", "historiadora",
-    "sociólogo", "socióloga", "podcaster",
+    # Jurídico / Arbitragem
+    "advogado", "advogada", "advogada criminalista", "advogado criminalista",
+    "árbitro", "árbitra", "arbitralista",
+    "mediador", "mediadora",
+    "juiz", "juíza", "juiz federal", "juiz de direito",
+    "desembargador", "desembargadora",
+    "procurador", "procuradora",
+    "promotor", "promotora",
+    "magistrado", "magistrada",
+    "defensor", "defensora", "defensor público", "defensora pública",
+    "jurista", "constitucionalista",
+    "delegado", "delegada",
+    "notário", "tabelião", "tabeliã",
+    "perito", "perita",
+    # Acadêmico
+    "professor", "professora", "prof.",
+    "doutor", "doutora", "dr.", "dra.",
+    "mestre", "especialista",
+    "pesquisador", "pesquisadora",
+    "cientista", "reitor", "reitora",
+    # Negócios / Economia
+    "economista", "empresário", "empresária",
+    "consultor", "consultora",
+    "diretor", "diretora",
+    "fundador", "fundadora",
+    "CEO", "CFO", "COO", "CTO",
+    "sócio", "sócia", "sócio-fundador", "sócia-fundadora",
+    "gestor", "gestora",
+    "investidor", "investidora",
+    "analista", "trader",
+    "contador", "contadora",
+    "administrador", "administradora",
+    "empreendedor", "empreendedora",
+    # Mídia / Entretenimento
+    "jornalista", "apresentador", "apresentadora",
+    "influenciador", "influenciadora",
+    "comediante", "escritor", "escritora",
+    "produtor", "produtora",
+    "músico", "cantor", "cantora",
+    "youtuber", "streamer", "podcaster",
+    # Saúde
+    "médico", "médica", "psicólogo", "psicóloga",
+    "psiquiatra", "terapeuta", "nutricionista",
+    # Engenharia / TI
+    "engenheiro", "engenheira",
+    "arquiteto", "arquiteta",
+    "programador", "programadora", "desenvolvedor", "desenvolvedora",
+    # Outros
+    "atleta", "político", "política",
+    "filósofo", "filósofa",
+    "historiador", "historiadora",
+    "sociólogo", "socióloga",
+    "militar", "coronel", "general",
 ]
 
 # Build a compiled regex that matches role keywords as whole words only
@@ -201,7 +316,11 @@ def _extract_role(text: str) -> str:
     """Extract a professional role from text using whole-word matching."""
     match = _ROLE_PATTERN.search(text)
     if match:
-        return match.group(1).capitalize()
+        role = match.group(1).strip()
+        # Capitalize first letter, keep rest (handles "CEO", "Dr.", etc.)
+        if role[0].islower():
+            role = role.capitalize()
+        return role
     return ""
 
 
@@ -290,10 +409,75 @@ def _google_canonise(name: str, context: str) -> str | None:
 
 
 def _search_snippet(query: str) -> str:
-    """Fetch a search snippet from Google. Returns raw text or empty string.
+    """Fetch search snippets. Tries DuckDuckGo first, Google as fallback.
 
-    Returns empty if Google blocks the request (captcha/redirect).
+    DuckDuckGo works from datacenter IPs (Railway, Render, etc.).
+    Google is only used as fallback if DDG fails.
     """
+    result = _search_duckduckgo(query)
+    if result:
+        return result
+
+    result = _search_google(query)
+    if result:
+        return result
+
+    return ""
+
+
+def _search_duckduckgo(query: str) -> str:
+    """Search DuckDuckGo HTML endpoint. Works from datacenters."""
+    url = "https://html.duckduckgo.com/html/"
+    data = urllib.parse.urlencode({"q": query}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        # Extract result snippets (class="result__snippet")
+        snippets = re.findall(
+            r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL
+        )
+        if not snippets:
+            # Fallback: try extracting from result bodies
+            snippets = re.findall(
+                r'class="result__body"[^>]*>(.*?)</div>', html, re.DOTALL
+            )
+
+        if not snippets:
+            logger.debug("DuckDuckGo: nenhum snippet para '%s'", query)
+            return ""
+
+        # Clean HTML tags and join snippets
+        texts = []
+        for s in snippets[:5]:
+            clean = re.sub(r"<[^>]+>", " ", s)
+            clean = re.sub(r"\s+", " ", clean).strip()
+            if clean:
+                texts.append(clean)
+
+        result = " ".join(texts)
+        logger.info("DuckDuckGo OK para '%s': %d chars", query, len(result))
+        return result[:2000]
+
+    except Exception as exc:
+        logger.debug("DuckDuckGo falhou para '%s': %s", query, exc)
+        return ""
+
+
+def _search_google(query: str) -> str:
+    """Search Google. Often blocked from datacenter IPs (captcha)."""
     encoded = urllib.parse.quote_plus(query)
     url = f"https://www.google.com/search?q={encoded}&hl=pt-BR"
     req = urllib.request.Request(
@@ -309,13 +493,12 @@ def _search_snippet(query: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="replace")
-        # Rough extraction of visible text from snippets
         text = re.sub(r"<[^>]+>", " ", html)
         text = re.sub(r"\s+", " ", text)
         text = text[:2000]
 
-        # Detect blocked/captcha responses
         if _is_blocked_response(text):
+            logger.debug("Google bloqueou busca para '%s'", query)
             return ""
 
         return text
@@ -325,24 +508,36 @@ def _search_snippet(query: str) -> str:
 
 def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
     """Extract a short bio-like sentence from a search snippet."""
+    # Build role alternatives from the keywords list
+    role_alts = "|".join(re.escape(r) for r in _ROLE_KEYWORDS)
+
     bio_patterns = [
+        # "é advogado/árbitro/etc"
+        r"é\s+(?:um(?:a)?\s+)?(?:" + role_alts + r")[a-zà-ü]*(?:\s+[^.]{3,60})?",
+        # "é um(a) profissional"
         r"é\s+(?:um(?:a)?)\s+([^.]{10,80})",
+        # "atua como advogado"
+        r"atua(?:ndo)?\s+(?:como|na|no|em)\s+[^.]{5,60}",
+        # "conhecido(a) como/por"
         r"conhecido(?:a)?\s+(?:como|por)\s+([^.]{10,80})",
-        r"(?:empresário|jornalista|economista|médico|advogado|professor|atleta|"
-        r"influenciador|apresentador|comediante|escritor|analista|trader|"
-        r"investidor)[a-z]*\s+([^.]{5,60})",
+        # "especialista em / especializado em"
+        r"especialista\s+em\s+[^.]{5,60}",
+        r"especializado(?:a)?\s+em\s+[^.]{5,60}",
+        # Role keyword followed by context
+        r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:e\s+)?(?:especialista|especializado)?[^.]{3,60}",
     ]
     for pat in bio_patterns:
         m = re.search(pat, snippet, re.IGNORECASE)
         if m:
-            words = m.group(0).split()[:max_words]
+            text = m.group(0).strip()
+            words = text.split()[:max_words]
             return " ".join(words)
 
     # Fallback: take the first sentence-like chunk
     sentences = re.split(r"[.!?]", snippet)
     for s in sentences:
         s = s.strip()
-        if 8 <= len(s.split()) <= 15:
+        if 5 <= len(s.split()) <= 15:
             words = s.split()[:max_words]
             return " ".join(words)
 

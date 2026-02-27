@@ -165,10 +165,12 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         keywords=keywords,
     )
 
-    # Generate mini-bios via web search (always, as fallback)
+    # Generate mini-bios: description parsing → web search (DDG → Google)
     for person in validated:
         if not person.mini_bio:
-            role, bio = generate_mini_bio(person.canonical, video.channel)
+            role, bio = generate_mini_bio(
+                person.canonical, video.channel, video.description
+            )
             person.role = role
             person.mini_bio = bio
 
