@@ -1,8 +1,11 @@
-"""Gemini AI integration for research and content generation.
+"""AI integration for research and content generation.
 
-Optimised for the free tier: a SINGLE API call generates all content
-(summary, topics, chapters, participant bios) to stay well within
-the 15 req/min and 1 500 req/day limits.
+Supports two FREE providers:
+  1. Gemini (GEMINI_API_KEY) — 15 req/min, 1 500 req/day
+  2. Groq  (GROQ_API_KEY)   — 30 req/min, 14 400 req/day
+
+A SINGLE API call generates all content (summary, topics, chapters,
+participant bios). If one provider fails, falls back to the other.
 """
 
 import json
@@ -17,29 +20,46 @@ logger = logging.getLogger(__name__)
 # Track errors so the pipeline can include them in diagnostics
 _recent_errors: list[str] = []
 
-# Models to try in order of preference
-_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
 
-# Cache the working model name so we don't retry 404s every call
-_working_model: str | None = None
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
+def ai_available() -> bool:
+    """Check if any AI provider is configured."""
+    gemini = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+    groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+    if gemini:
+        logger.info("GEMINI_API_KEY configurada")
+    if groq:
+        logger.info("GROQ_API_KEY configurada")
+    if not gemini and not groq:
+        logger.warning("Nenhuma API key de IA configurada — IA desabilitada")
+    return gemini or groq
 
 
-def gemini_available() -> bool:
-    """Check if Gemini API key is configured."""
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key:
-        logger.warning("GEMINI_API_KEY não configurada — IA desabilitada")
-    else:
-        logger.info("GEMINI_API_KEY configurada (%s...)", key[:8])
-    return bool(key)
+# Keep old name as alias so existing imports still work
+gemini_available = ai_available
 
 
 def get_recent_errors() -> list[str]:
-    """Return and clear recent Gemini errors for diagnostics."""
+    """Return and clear recent AI errors for diagnostics."""
     errors = list(_recent_errors)
     _recent_errors.clear()
     return errors
 
+
+def get_ai_status() -> dict:
+    """Return which AI providers are configured."""
+    return {
+        "gemini": bool(os.environ.get("GEMINI_API_KEY", "").strip()),
+        "groq": bool(os.environ.get("GROQ_API_KEY", "").strip()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main entry point — single call for ALL content
+# ---------------------------------------------------------------------------
 
 def generate_all_content(
     title: str,
@@ -50,21 +70,55 @@ def generate_all_content(
     duration: int,
     channel_name: str,
 ) -> dict:
-    """Generate ALL AI content in a SINGLE Gemini call.
+    """Generate ALL AI content in a SINGLE call.
+
+    Tries Groq first (more generous free tier), then Gemini as fallback.
 
     Returns a dict with keys:
-      - summary: str (1-2 sentences)
-      - topics: list[str] (4-6 topics)
-      - chapters: list[dict] (with start/title)
-      - participants: list[dict] (with name/role/bio)
+      - summary: str
+      - topics: list[str]
+      - chapters: list[dict]
+      - participants: list[dict]
 
-    Any missing key means that part failed → use heuristic fallback.
+    Any missing key means that part failed -> use heuristic fallback.
     """
+    prompt = _build_prompt(
+        title, description, transcript, participant_names,
+        existing_chapters, duration, channel_name,
+    )
+
+    # Try providers in order: Groq (better free tier) -> Gemini
+    result_text = ""
+    providers = _get_provider_order()
+
+    for provider_fn in providers:
+        result_text = provider_fn(prompt)
+        if result_text:
+            break
+
+    if not result_text:
+        return {}
+
+    return _parse_ai_response(result_text)
+
+
+# ---------------------------------------------------------------------------
+# Prompt builder
+# ---------------------------------------------------------------------------
+
+def _build_prompt(
+    title: str,
+    description: str,
+    transcript: str,
+    participant_names: list[str],
+    existing_chapters: list[dict],
+    duration: int,
+    channel_name: str,
+) -> str:
     transcript_sample = transcript[:4000] if transcript else ""
     names = ", ".join(participant_names) if participant_names else "os participantes"
     duration_min = duration // 60
 
-    # Build chapters context
     chapters_ctx = ""
     if existing_chapters:
         chapters_ctx = (
@@ -78,7 +132,6 @@ def generate_all_content(
             f"Primeiro: 0s (Introdução), último: Conclusão."
         )
 
-    # Build participants context
     participants_ctx = ""
     if participant_names:
         participants_ctx = (
@@ -88,7 +141,7 @@ def generate_all_content(
             f"Participantes: {names}"
         )
 
-    prompt = f"""Você é um assistente que gera metadados para vídeos de podcast no YouTube.
+    return f"""Você é um assistente que gera metadados para vídeos de podcast no YouTube.
 Podcast: '{title}'
 Canal: '{channel_name}'
 Duração: {duration_min} minutos
@@ -111,13 +164,14 @@ Gere TUDO abaixo em um ÚNICO JSON:
 
 Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
 
-    result = _call_gemini(prompt)
-    if not result:
-        return {}
 
+# ---------------------------------------------------------------------------
+# Response parser
+# ---------------------------------------------------------------------------
+
+def _parse_ai_response(result_text: str) -> dict:
     try:
-        clean = result.strip()
-        # Remove markdown code block if present
+        clean = result_text.strip()
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         data = json.loads(clean)
@@ -126,7 +180,6 @@ Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
 
         parsed: dict = {}
 
-        # Summary
         if data.get("summary"):
             s = str(data["summary"]).strip().strip('"').strip("'")
             words = s.split()
@@ -134,11 +187,9 @@ Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
                 s = " ".join(words[:50]) + "."
             parsed["summary"] = s
 
-        # Topics
         if isinstance(data.get("topics"), list) and data["topics"]:
             parsed["topics"] = [str(t) for t in data["topics"][:6]]
 
-        # Chapters
         if isinstance(data.get("chapters"), list) and data["chapters"]:
             parsed["chapters"] = [
                 {"start": int(ch.get("start", 0)), "title": str(ch.get("title", ""))}
@@ -146,7 +197,6 @@ Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
                 if isinstance(ch, dict)
             ]
 
-        # Participants
         if isinstance(data.get("participants"), list) and data["participants"]:
             parsed["participants"] = [
                 {
@@ -158,104 +208,206 @@ Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
                 if isinstance(p, dict)
             ]
 
-        logger.info("generate_all_content OK: keys=%s", list(parsed.keys()))
+        logger.info("AI response parsed OK: keys=%s", list(parsed.keys()))
         return parsed
 
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
-        err = f"Falha ao parsear resposta do Gemini: {exc}"
+        err = f"Falha ao parsear resposta da IA: {exc}"
         logger.error(err)
         _recent_errors.append(err)
         return {}
 
 
 # ---------------------------------------------------------------------------
-# Internal
+# Provider selection
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = [5, 15, 30]  # seconds to wait on 429
+def _get_provider_order() -> list:
+    """Return provider call functions in priority order.
 
-
-def _call_gemini(prompt: str) -> str:
-    """Call Gemini API with retry on rate limits (429).
-
-    Tries multiple models if the primary one returns 404.
+    Groq first (30 RPM, 14k RPD), Gemini second.
     """
-    global _working_model
+    providers = []
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        providers.append(_call_groq)
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        providers.append(_call_gemini)
+    return providers
 
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+
+# ---------------------------------------------------------------------------
+# Groq provider (OpenAI-compatible API, free tier: 30 RPM, 14 400 RPD)
+# ---------------------------------------------------------------------------
+
+_GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile"]
+_groq_working_model: str | None = None
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [5, 15, 30]
+
+
+def _call_groq(prompt: str) -> str:
+    """Call Groq API with retry on rate limit."""
+    global _groq_working_model
+
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        logger.warning("_call_gemini: sem API key, pulando")
         return ""
 
-    models_to_try = [_working_model] if _working_model else _MODELS
+    models = [_groq_working_model] if _groq_working_model else _GROQ_MODELS
 
-    for model in models_to_try:
-        result = _call_with_retry(prompt, model, api_key)
+    for model in models:
+        result = _call_groq_with_retry(prompt, model, api_key)
         if result is not None:
-            _working_model = model
+            _groq_working_model = model
             return result
-        # result is None means 404 (model not found), try next
 
     return ""
 
 
-def _call_with_retry(prompt: str, model: str, api_key: str) -> str | None:
-    """Call Gemini with automatic retry on 429 rate limit.
-
-    Returns text, "" on error, or None if 404 (try next model).
-    """
+def _call_groq_with_retry(prompt: str, model: str, api_key: str) -> str | None:
     for attempt in range(_MAX_RETRIES + 1):
-        result = _call_gemini_single(prompt, model, api_key)
+        result = _call_groq_single(prompt, model, api_key)
 
-        # None = 404 model not found → bubble up to try next model
         if result is None:
-            return None
+            return None  # model not found, try next
 
-        # _RATE_LIMITED sentinel: wait and retry
         if result == _RATE_LIMITED:
             if attempt < _MAX_RETRIES:
                 wait = _RETRY_BACKOFF[attempt]
-                logger.info("Rate limited (429). Aguardando %ds antes de tentar novamente (%d/%d)...",
+                logger.info("Groq rate limited. Aguardando %ds (%d/%d)...",
                             wait, attempt + 1, _MAX_RETRIES)
                 time.sleep(wait)
                 continue
             else:
-                logger.error("Rate limit persistente após %d tentativas", _MAX_RETRIES + 1)
                 _recent_errors.append(
-                    f"Gemini rate limit (429) — tentou {_MAX_RETRIES + 1}x. "
-                    f"Aguarde 1 minuto e tente novamente."
+                    f"Groq rate limit (429) — tentou {_MAX_RETRIES + 1}x."
                 )
                 return ""
 
-        # Normal result (could be "" on other errors, or actual text)
         return result
 
     return ""
 
 
-# Sentinel value for rate limit
-_RATE_LIMITED = "__RATE_LIMITED__"
+def _call_groq_single(prompt: str, model: str, api_key: str) -> str | None:
+    """Call Groq once. Returns text, '' on error, None on 404, _RATE_LIMITED on 429."""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    logger.info("Chamando Groq (%s)...", model)
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        choices = data.get("choices", [])
+        if not choices:
+            err = f"Groq ({model}) retornou sem choices"
+            logger.error(err)
+            _recent_errors.append(err)
+            return ""
+        text = choices[0].get("message", {}).get("content", "")
+        logger.info("Groq (%s) respondeu OK (%d chars)", model, len(text))
+        return text
+    except urllib.error.HTTPError as exc:
+        error_body = _read_error_body(exc)
+        err_detail = _parse_error_detail(exc, error_body)
+
+        if exc.code == 404:
+            logger.info("Groq modelo %s não encontrado, tentando próximo", model)
+            return None
+        if exc.code == 429:
+            logger.warning("Groq rate limit (429): %s", err_detail)
+            return _RATE_LIMITED
+
+        err = f"Groq ({model}) {err_detail}"
+        logger.error(err)
+        _recent_errors.append(err)
+    except Exception as exc:
+        err = f"Groq ({model}) erro: {exc}"
+        logger.error(err)
+        _recent_errors.append(err)
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Gemini provider
+# ---------------------------------------------------------------------------
+
+_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+_gemini_working_model: str | None = None
+
+
+def _call_gemini(prompt: str) -> str:
+    """Call Gemini API with retry on rate limit."""
+    global _gemini_working_model
+
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return ""
+
+    models = [_gemini_working_model] if _gemini_working_model else _GEMINI_MODELS
+
+    for model in models:
+        result = _call_gemini_with_retry(prompt, model, api_key)
+        if result is not None:
+            _gemini_working_model = model
+            return result
+
+    return ""
+
+
+def _call_gemini_with_retry(prompt: str, model: str, api_key: str) -> str | None:
+    for attempt in range(_MAX_RETRIES + 1):
+        result = _call_gemini_single(prompt, model, api_key)
+
+        if result is None:
+            return None
+
+        if result == _RATE_LIMITED:
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF[attempt]
+                logger.info("Gemini rate limited. Aguardando %ds (%d/%d)...",
+                            wait, attempt + 1, _MAX_RETRIES)
+                time.sleep(wait)
+                continue
+            else:
+                _recent_errors.append(
+                    f"Gemini rate limit (429) — tentou {_MAX_RETRIES + 1}x."
+                )
+                return ""
+
+        return result
+
+    return ""
 
 
 def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
-    """Call a specific Gemini model once.
-
-    Returns:
-      - text response on success
-      - "" on non-retryable error
-      - None if 404 (model not found)
-      - _RATE_LIMITED if 429
-    """
+    """Call Gemini once. Returns text, '' on error, None on 404, _RATE_LIMITED on 429."""
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/"
         f"models/{model}:generateContent?key={api_key}"
     )
 
     body = json.dumps({
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.3,
             "maxOutputTokens": 2048,
@@ -263,21 +415,19 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
     }).encode("utf-8")
 
     req = urllib.request.Request(
-        url,
-        data=body,
+        url, data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
 
-    logger.info("Chamando Gemini (%s) — prompt: %.80s...", model, prompt)
+    logger.info("Chamando Gemini (%s)...", model)
 
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
+            data = json.loads(resp.read().decode("utf-8"))
         candidates = data.get("candidates", [])
         if not candidates:
-            err = f"Gemini ({model}) retornou sem candidates: {json.dumps(data, ensure_ascii=False)[:300]}"
+            err = f"Gemini ({model}) retornou sem candidates"
             logger.error(err)
             _recent_errors.append(err)
             return ""
@@ -291,24 +441,12 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
         logger.info("Gemini (%s) respondeu OK (%d chars)", model, len(text))
         return text
     except urllib.error.HTTPError as exc:
-        error_body = ""
-        try:
-            error_body = exc.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-
-        err_detail = f"HTTP {exc.code}: {exc.reason}"
-        try:
-            err_data = json.loads(error_body)
-            err_detail = err_data.get("error", {}).get("message", err_detail)
-        except Exception:
-            if error_body:
-                err_detail = f"HTTP {exc.code}: {error_body[:200]}"
+        error_body = _read_error_body(exc)
+        err_detail = _parse_error_detail(exc, error_body)
 
         if exc.code == 404:
-            logger.info("Modelo %s não encontrado (404), tentando próximo", model)
+            logger.info("Gemini modelo %s não encontrado, tentando próximo", model)
             return None
-
         if exc.code == 429:
             logger.warning("Gemini rate limit (429): %s", err_detail)
             return _RATE_LIMITED
@@ -326,3 +464,35 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
         _recent_errors.append(err)
 
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+_RATE_LIMITED = "__RATE_LIMITED__"
+
+
+def _read_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="replace")[:500]
+    except Exception:
+        return ""
+
+
+def _parse_error_detail(exc: urllib.error.HTTPError, error_body: str) -> str:
+    err_detail = f"HTTP {exc.code}: {exc.reason}"
+    try:
+        err_data = json.loads(error_body)
+        # Gemini format
+        msg = err_data.get("error", {}).get("message")
+        if msg:
+            return msg
+        # OpenAI/Groq format
+        msg = err_data.get("error", {}).get("message")
+        if msg:
+            return msg
+    except Exception:
+        if error_body:
+            return f"HTTP {exc.code}: {error_body[:200]}"
+    return err_detail
