@@ -119,14 +119,14 @@ let pollTimer = null;
       parts.push('<span class="config-fail">YouTube API NAO CONFIGURADA</span>');
     }
     const ai = data.ai || {};
-    if (ai.groq) {
-      parts.push('<span class="config-ok">Groq AI OK</span>');
+    if (ai.openrouter) {
+      parts.push('<span class="config-ok">OpenRouter AI OK</span>');
     }
     if (ai.gemini) {
       parts.push('<span class="config-ok">Gemini AI OK</span>');
     }
-    if (!ai.groq && !ai.gemini) {
-      parts.push('<span class="config-fail">IA NAO CONFIGURADA (GROQ_API_KEY ou GEMINI_API_KEY)</span>');
+    if (!ai.openrouter && !ai.gemini) {
+      parts.push('<span class="config-fail">IA NAO CONFIGURADA (OPENROUTER_API_KEY ou GEMINI_API_KEY)</span>');
     }
     el.innerHTML = parts.join(' &bull; ');
   }).catch(() => {});

@@ -1,8 +1,8 @@
 """AI integration for research and content generation.
 
-Supports two FREE providers:
-  1. Gemini (GEMINI_API_KEY) — 15 req/min, 1 500 req/day
-  2. Groq  (GROQ_API_KEY)   — 30 req/min, 14 400 req/day
+Supports FREE providers:
+  1. OpenRouter (OPENROUTER_API_KEY) — free models, works from datacenters
+  2. Gemini    (GEMINI_API_KEY)      — 15 req/min, 1 500 req/day
 
 A SINGLE API call generates all content (summary, topics, chapters,
 participant bios). If one provider fails, falls back to the other.
@@ -27,15 +27,15 @@ _recent_errors: list[str] = []
 
 def ai_available() -> bool:
     """Check if any AI provider is configured."""
+    openrouter = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
     gemini = bool(os.environ.get("GEMINI_API_KEY", "").strip())
-    groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+    if openrouter:
+        logger.info("OPENROUTER_API_KEY configurada")
     if gemini:
         logger.info("GEMINI_API_KEY configurada")
-    if groq:
-        logger.info("GROQ_API_KEY configurada")
-    if not gemini and not groq:
+    if not openrouter and not gemini:
         logger.warning("Nenhuma API key de IA configurada — IA desabilitada")
-    return gemini or groq
+    return openrouter or gemini
 
 
 # Keep old name as alias so existing imports still work
@@ -52,8 +52,8 @@ def get_recent_errors() -> list[str]:
 def get_ai_status() -> dict:
     """Return which AI providers are configured."""
     return {
+        "openrouter": bool(os.environ.get("OPENROUTER_API_KEY", "").strip()),
         "gemini": bool(os.environ.get("GEMINI_API_KEY", "").strip()),
-        "groq": bool(os.environ.get("GROQ_API_KEY", "").strip()),
     }
 
 
@@ -72,7 +72,8 @@ def generate_all_content(
 ) -> dict:
     """Generate ALL AI content in a SINGLE call.
 
-    Tries Groq first (more generous free tier), then Gemini as fallback.
+    Tries OpenRouter first (free models, works from servers),
+    then Gemini as fallback.
 
     Returns a dict with keys:
       - summary: str
@@ -87,7 +88,6 @@ def generate_all_content(
         existing_chapters, duration, channel_name,
     )
 
-    # Try providers in order: Groq (better free tier) -> Gemini
     result_text = ""
     providers = _get_provider_order()
 
@@ -225,63 +225,73 @@ def _parse_ai_response(result_text: str) -> dict:
 def _get_provider_order() -> list:
     """Return provider call functions in priority order.
 
-    Groq first (30 RPM, 14k RPD), Gemini second.
+    OpenRouter first (free models, works from servers), Gemini second.
     """
     providers = []
-    if os.environ.get("GROQ_API_KEY", "").strip():
-        providers.append(_call_groq)
+    if os.environ.get("OPENROUTER_API_KEY", "").strip():
+        providers.append(_call_openrouter)
     if os.environ.get("GEMINI_API_KEY", "").strip():
         providers.append(_call_gemini)
     return providers
 
 
 # ---------------------------------------------------------------------------
-# Groq provider (OpenAI-compatible API, free tier: 30 RPM, 14 400 RPD)
+# Retry / shared constants
 # ---------------------------------------------------------------------------
-
-_GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile"]
-_groq_working_model: str | None = None
 
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = [5, 15, 30]
+_RATE_LIMITED = "__RATE_LIMITED__"
 
 
-def _call_groq(prompt: str) -> str:
-    """Call Groq API with retry on rate limit."""
-    global _groq_working_model
+# ---------------------------------------------------------------------------
+# OpenRouter provider (free models, OpenAI-compatible, works from datacenters)
+# ---------------------------------------------------------------------------
 
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+# Free models on OpenRouter (suffix :free = no cost)
+_OPENROUTER_MODELS = [
+    "google/gemini-2.0-flash-exp:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+]
+_openrouter_working_model: str | None = None
+
+
+def _call_openrouter(prompt: str) -> str:
+    """Call OpenRouter API with retry on rate limit."""
+    global _openrouter_working_model
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         return ""
 
-    models = [_groq_working_model] if _groq_working_model else _GROQ_MODELS
+    models = [_openrouter_working_model] if _openrouter_working_model else _OPENROUTER_MODELS
 
     for model in models:
-        result = _call_groq_with_retry(prompt, model, api_key)
+        result = _call_openrouter_with_retry(prompt, model, api_key)
         if result is not None:
-            _groq_working_model = model
+            _openrouter_working_model = model
             return result
 
     return ""
 
 
-def _call_groq_with_retry(prompt: str, model: str, api_key: str) -> str | None:
+def _call_openrouter_with_retry(prompt: str, model: str, api_key: str) -> str | None:
     for attempt in range(_MAX_RETRIES + 1):
-        result = _call_groq_single(prompt, model, api_key)
+        result = _call_openrouter_single(prompt, model, api_key)
 
         if result is None:
-            return None  # model not found, try next
+            return None  # model not available, try next
 
         if result == _RATE_LIMITED:
             if attempt < _MAX_RETRIES:
                 wait = _RETRY_BACKOFF[attempt]
-                logger.info("Groq rate limited. Aguardando %ds (%d/%d)...",
+                logger.info("OpenRouter rate limited. Aguardando %ds (%d/%d)...",
                             wait, attempt + 1, _MAX_RETRIES)
                 time.sleep(wait)
                 continue
             else:
                 _recent_errors.append(
-                    f"Groq rate limit (429) — tentou {_MAX_RETRIES + 1}x."
+                    f"OpenRouter rate limit — tentou {_MAX_RETRIES + 1}x."
                 )
                 return ""
 
@@ -290,9 +300,9 @@ def _call_groq_with_retry(prompt: str, model: str, api_key: str) -> str | None:
     return ""
 
 
-def _call_groq_single(prompt: str, model: str, api_key: str) -> str | None:
-    """Call Groq once. Returns text, '' on error, None on 404, _RATE_LIMITED on 429."""
-    url = "https://api.groq.com/openai/v1/chat/completions"
+def _call_openrouter_single(prompt: str, model: str, api_key: str) -> str | None:
+    """Call OpenRouter once. Returns text, '' on error, None if model unavailable, _RATE_LIMITED on 429."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
     body = json.dumps({
         "model": model,
@@ -307,40 +317,58 @@ def _call_groq_single(prompt: str, model: str, api_key: str) -> str | None:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://descricao-arbitragem.up.railway.app",
+            "X-Title": "Descricao Arbitragem",
         },
         method="POST",
     )
 
-    logger.info("Chamando Groq (%s)...", model)
+    logger.info("Chamando OpenRouter (%s)...", model)
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=90) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+
+        # Check for error in response body (OpenRouter sometimes returns 200 with error)
+        if data.get("error"):
+            err_msg = data["error"].get("message", str(data["error"]))
+            err_code = data["error"].get("code", 0)
+            if err_code == 404 or "not found" in str(err_msg).lower():
+                logger.info("OpenRouter modelo %s indisponível: %s", model, err_msg)
+                return None
+            if err_code == 429 or "rate" in str(err_msg).lower():
+                logger.warning("OpenRouter rate limit: %s", err_msg)
+                return _RATE_LIMITED
+            err = f"OpenRouter ({model}) erro: {err_msg}"
+            logger.error(err)
+            _recent_errors.append(err)
+            return ""
+
         choices = data.get("choices", [])
         if not choices:
-            err = f"Groq ({model}) retornou sem choices"
+            err = f"OpenRouter ({model}) retornou sem choices"
             logger.error(err)
             _recent_errors.append(err)
             return ""
         text = choices[0].get("message", {}).get("content", "")
-        logger.info("Groq (%s) respondeu OK (%d chars)", model, len(text))
+        logger.info("OpenRouter (%s) respondeu OK (%d chars)", model, len(text))
         return text
     except urllib.error.HTTPError as exc:
         error_body = _read_error_body(exc)
         err_detail = _parse_error_detail(exc, error_body)
 
         if exc.code == 404:
-            logger.info("Groq modelo %s não encontrado, tentando próximo", model)
+            logger.info("OpenRouter modelo %s não encontrado", model)
             return None
         if exc.code == 429:
-            logger.warning("Groq rate limit (429): %s", err_detail)
+            logger.warning("OpenRouter rate limit (429): %s", err_detail)
             return _RATE_LIMITED
 
-        err = f"Groq ({model}) {err_detail}"
+        err = f"OpenRouter ({model}) {err_detail}"
         logger.error(err)
         _recent_errors.append(err)
     except Exception as exc:
-        err = f"Groq ({model}) erro: {exc}"
+        err = f"OpenRouter ({model}) erro: {exc}"
         logger.error(err)
         _recent_errors.append(err)
 
@@ -348,7 +376,7 @@ def _call_groq_single(prompt: str, model: str, api_key: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Gemini provider
+# Gemini provider (direct Google API)
 # ---------------------------------------------------------------------------
 
 _GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
@@ -470,9 +498,6 @@ def _call_gemini_single(prompt: str, model: str, api_key: str) -> str | None:
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-_RATE_LIMITED = "__RATE_LIMITED__"
-
-
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
     try:
         return exc.read().decode("utf-8", errors="replace")[:500]
@@ -484,11 +509,6 @@ def _parse_error_detail(exc: urllib.error.HTTPError, error_body: str) -> str:
     err_detail = f"HTTP {exc.code}: {exc.reason}"
     try:
         err_data = json.loads(error_body)
-        # Gemini format
-        msg = err_data.get("error", {}).get("message")
-        if msg:
-            return msg
-        # OpenAI/Groq format
         msg = err_data.get("error", {}).get("message")
         if msg:
             return msg
