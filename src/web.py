@@ -42,6 +42,10 @@ def api_health():
         "youtube_api": bool(yt_key),
         "youtube_api_prefix": yt_key[:8] + "..." if yt_key else None,
         "google_search": bool(google_key and google_cse),
+        "google_api_key_set": bool(google_key),
+        "google_cse_id_set": bool(google_cse),
+        "google_api_key_prefix": google_key[:8] + "..." if google_key else None,
+        "google_cse_id_prefix": google_cse[:8] + "..." if google_cse else None,
         "ai": ai_status,
     }
 

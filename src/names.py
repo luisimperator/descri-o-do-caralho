@@ -300,26 +300,6 @@ _ROLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Indicators that Google returned a blocked/captcha page
-_BLOCKED_INDICATORS = [
-    "redirecionamento não iniciar",
-    "unusual traffic",
-    "captcha",
-    "are you a robot",
-    "nosso sistema detectou",
-    "{display:none}",
-    "recaptcha",
-    "sorry/index",
-    "detected unusual traffic",
-    "clique aqui se o redirecionamento",
-]
-
-
-def _is_blocked_response(text: str) -> bool:
-    """Detect if Google returned a captcha/block page instead of results."""
-    text_lower = text.lower()
-    return any(ind in text_lower for ind in _BLOCKED_INDICATORS)
-
 
 def _extract_role(text: str) -> str:
     """Extract a professional role from text using whole-word matching."""
@@ -436,9 +416,15 @@ def _search_google_api(query: str) -> str:
     api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
     cse_id = os.environ.get("GOOGLE_CSE_ID", "").strip()
 
-    if not api_key or not cse_id:
-        logger.debug("Google Custom Search: GOOGLE_API_KEY ou GOOGLE_CSE_ID não configurados")
+    if not api_key:
+        logger.warning("Google Custom Search: GOOGLE_API_KEY não configurada")
         return ""
+    if not cse_id:
+        logger.warning("Google Custom Search: GOOGLE_CSE_ID não configurado")
+        return ""
+
+    logger.info("Google API: buscando '%s' (key=%s... cx=%s...)",
+                query, api_key[:8], cse_id[:8])
 
     params = urllib.parse.urlencode({
         "key": api_key,

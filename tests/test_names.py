@@ -3,7 +3,6 @@
 from src.names import (
     collect_name_candidates,
     ValidatedName,
-    _is_blocked_response,
     _filter_non_names,
     _extract_role,
 )
@@ -53,18 +52,6 @@ def test_filter_non_names_removes_role_words():
     assert "Entrevistador Palestrante" not in filtered
     assert "João Silva" in filtered
 
-
-def test_is_blocked_response_detects_captcha():
-    garbage = (
-        "c || {cap:0}; table,div,span,p{display:none} "
-        "Clique aqui se o redirecionamento não iniciar em"
-    )
-    assert _is_blocked_response(garbage) is True
-
-
-def test_is_blocked_response_allows_real():
-    real = "João Silva é um economista brasileiro. Professor da USP."
-    assert _is_blocked_response(real) is False
 
 
 def test_extract_role_whole_word():
