@@ -34,6 +34,8 @@ def api_health():
     """Health check showing configuration status."""
     yt_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
     google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    # Falls back to YOUTUBE_API_KEY (same Google Cloud project)
+    effective_google_key = google_key or yt_key
     google_cse = os.environ.get("GOOGLE_CSE_ID", "").strip()
     ai_status = get_ai_status()
 
@@ -41,10 +43,10 @@ def api_health():
         "status": "ok",
         "youtube_api": bool(yt_key),
         "youtube_api_prefix": yt_key[:8] + "..." if yt_key else None,
-        "google_search": bool(google_key and google_cse),
-        "google_api_key_set": bool(google_key),
+        "google_search": bool(effective_google_key and google_cse),
+        "google_api_key_set": bool(effective_google_key),
+        "google_api_key_source": "GOOGLE_API_KEY" if google_key else ("YOUTUBE_API_KEY" if yt_key else None),
         "google_cse_id_set": bool(google_cse),
-        "google_api_key_prefix": google_key[:8] + "..." if google_key else None,
         "google_cse_id_prefix": google_cse[:8] + "..." if google_cse else None,
         "ai": ai_status,
     }

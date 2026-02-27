@@ -409,15 +409,19 @@ def _search_google_api(query: str) -> str:
 
     Setup:
       1. console.cloud.google.com → enable "Custom Search API"
-      2. programmablesearchengine.google.com → create engine → "Search the entire web"
+      2. programmablesearchengine.google.com → create engine
+         (add sites like wikipedia.org, linkedin.com, etc.)
       3. Copy the Search engine ID → set as GOOGLE_CSE_ID in Railway
-      4. Set GOOGLE_API_KEY (can be the same as YOUTUBE_API_KEY if Custom Search is enabled)
+      4. GOOGLE_API_KEY falls back to YOUTUBE_API_KEY automatically
     """
     api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    if not api_key:
+        # Fall back to YOUTUBE_API_KEY — same Google Cloud project
+        api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
     cse_id = os.environ.get("GOOGLE_CSE_ID", "").strip()
 
     if not api_key:
-        logger.warning("Google Custom Search: GOOGLE_API_KEY não configurada")
+        logger.warning("Google Custom Search: sem API key (GOOGLE_API_KEY nem YOUTUBE_API_KEY)")
         return ""
     if not cse_id:
         logger.warning("Google Custom Search: GOOGLE_CSE_ID não configurado")

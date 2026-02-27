@@ -119,10 +119,11 @@ let pollTimer = null;
       parts.push('<span class="config-fail">YouTube API NAO CONFIGURADA</span>');
     }
     if (data.google_search) {
-      parts.push('<span class="config-ok">Google Search OK (' + (data.google_cse_id_prefix || '') + ')</span>');
+      const src = data.google_api_key_source || 'API key';
+      parts.push('<span class="config-ok">Google Search OK (key via ' + src + ')</span>');
     } else {
       let missing = [];
-      if (!data.google_api_key_set) missing.push('GOOGLE_API_KEY');
+      if (!data.google_api_key_set) missing.push('API KEY (GOOGLE_API_KEY ou YOUTUBE_API_KEY)');
       if (!data.google_cse_id_set) missing.push('GOOGLE_CSE_ID');
       parts.push('<span class="config-fail">Google Search: falta ' + missing.join(' e ') + '</span>');
     }
