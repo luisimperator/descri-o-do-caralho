@@ -90,13 +90,19 @@ def generate_all_content(
 
     result_text = ""
     providers = _get_provider_order()
+    provider_names = {id(_call_openrouter): "OpenRouter", id(_call_gemini): "Gemini"}
 
     for provider_fn in providers:
+        name = provider_names.get(id(provider_fn), "unknown")
+        logger.info("IA: tentando provider %s...", name)
         result_text = provider_fn(prompt)
         if result_text:
+            logger.info("IA: provider %s retornou conteúdo (%d chars)", name, len(result_text))
             break
+        logger.warning("IA: provider %s falhou, tentando próximo...", name)
 
     if not result_text:
+        logger.error("IA: todos os providers falharam")
         return {}
 
     return _parse_ai_response(result_text)
@@ -293,11 +299,11 @@ def _call_openrouter_with_retry(prompt: str, model: str, api_key: str) -> str | 
                 _recent_errors.append(
                     f"OpenRouter rate limit — tentou {_MAX_RETRIES + 1}x."
                 )
-                return ""
+                return None  # None = skip to next model/provider
 
         return result
 
-    return ""
+    return None
 
 
 def _call_openrouter_single(prompt: str, model: str, api_key: str) -> str | None:
@@ -389,7 +395,10 @@ def _call_gemini(prompt: str) -> str:
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
+        logger.warning("Gemini: GEMINI_API_KEY não configurada, pulando fallback")
         return ""
+
+    logger.info("Gemini: tentando como fallback...")
 
     models = [_gemini_working_model] if _gemini_working_model else _GEMINI_MODELS
 

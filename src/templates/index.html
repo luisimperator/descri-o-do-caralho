@@ -207,23 +207,32 @@ function showResult(result) {
   const diag = result.diagnostics || {};
   const diagEl = document.getElementById('diagBar');
   let diagHtml = '';
-  if (diag.gemini_configured) {
-    if (diag.gemini_used) {
-      diagHtml += '<span class="badge badge-ok">Gemini AI ativo</span>';
+  if (diag.ai_configured || diag.gemini_configured) {
+    if (diag.ai_used || diag.gemini_used) {
+      diagHtml += '<span class="badge badge-ok">IA ativa</span>';
     } else {
-      diagHtml += '<span class="badge badge-fail">Gemini configurado mas nao usado</span>';
+      diagHtml += '<span class="badge badge-fail">IA configurada mas falhou</span>';
     }
   } else {
-    diagHtml += '<span class="badge badge-fail">Gemini nao configurado</span>';
+    diagHtml += '<span class="badge badge-fail">IA nao configurada</span>';
   }
   diagHtml += diag.ai_summary ? '<span class="badge badge-ok">Resumo IA</span>' : '<span class="badge badge-warn">Resumo heuristico</span>';
   diagHtml += diag.ai_chapters ? '<span class="badge badge-ok">Capitulos IA</span>' : '<span class="badge badge-warn">Capitulos auto</span>';
   diagHtml += diag.ai_topics ? '<span class="badge badge-ok">Topicos IA</span>' : '<span class="badge badge-warn">Topicos heuristico</span>';
   diagHtml += diag.transcript_available ? '<span class="badge badge-ok">Transcricao OK</span>' : '<span class="badge badge-fail">Sem transcricao</span>';
-  if (diag.gemini_errors && diag.gemini_errors.length > 0) {
-    diagHtml += '<br><span style="color:#ff8888;font-size:.75rem;margin-top:.3rem;display:inline-block">Gemini API: ' + escapeHtml(diag.gemini_errors[0]) + '</span>';
-  } else if (diag.errors && diag.errors.length > 0) {
-    diagHtml += '<br><span style="color:#ff8888;font-size:.75rem;margin-top:.3rem;display:inline-block">Erros: ' + escapeHtml(diag.errors.join('; ')) + '</span>';
+  // Show ALL errors (AI + search)
+  var allErrors = [];
+  if (diag.ai_errors && diag.ai_errors.length > 0) allErrors = allErrors.concat(diag.ai_errors.map(function(e) { return 'IA: ' + e; }));
+  if (diag.gemini_errors && diag.gemini_errors.length > 0) allErrors = allErrors.concat(diag.gemini_errors.map(function(e) { return 'IA: ' + e; }));
+  if (diag.search_errors && diag.search_errors.length > 0) allErrors = allErrors.concat(diag.search_errors.map(function(e) { return 'Busca: ' + e; }));
+  if (diag.errors && diag.errors.length > 0) allErrors = allErrors.concat(diag.errors);
+  // Deduplicate
+  allErrors = [...new Set(allErrors)];
+  if (allErrors.length > 0) {
+    diagHtml += '<br>';
+    allErrors.forEach(function(err) {
+      diagHtml += '<span style="color:#ff8888;font-size:.75rem;margin-top:.2rem;display:block">' + escapeHtml(err) + '</span>';
+    });
   }
   diagEl.innerHTML = diagHtml;
   diagEl.classList.add('visible');

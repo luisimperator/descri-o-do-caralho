@@ -11,6 +11,16 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Track search errors for diagnostics
+_search_errors: list[str] = []
+
+
+def get_search_errors() -> list[str]:
+    """Return and clear recent search errors for diagnostics."""
+    errors = list(_search_errors)
+    _search_errors.clear()
+    return errors
+
 
 @dataclass
 class ValidatedName:
@@ -471,11 +481,20 @@ def _search_google_api(query: str) -> str:
             error_body = exc.read().decode("utf-8", errors="replace")[:300]
         except Exception:
             pass
-        logger.warning("Google API falhou para '%s': HTTP %d — %s",
-                        query, exc.code, error_body[:150])
+        err_msg = f"Google Search HTTP {exc.code}"
+        if exc.code == 403:
+            err_msg = "Google Search 403 — Custom Search API não habilitada no projeto Google Cloud"
+        elif exc.code == 400:
+            err_msg = f"Google Search 400 — verifique GOOGLE_CSE_ID: {error_body[:100]}"
+        else:
+            err_msg = f"Google Search HTTP {exc.code}: {error_body[:100]}"
+        logger.warning("Google API falhou para '%s': %s", query, err_msg)
+        _search_errors.append(err_msg)
         return ""
     except Exception as exc:
-        logger.warning("Google API falhou para '%s': %s", query, exc)
+        err_msg = f"Google Search erro: {exc}"
+        logger.warning("Google API falhou para '%s': %s", query, err_msg)
+        _search_errors.append(err_msg)
         return ""
 
 

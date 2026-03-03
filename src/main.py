@@ -14,6 +14,7 @@ from .names import (
     collect_name_candidates,
     validate_and_canonise,
     generate_mini_bio,
+    get_search_errors,
 )
 from .content import (
     generate_summary,
@@ -83,6 +84,9 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
     """
     use_ai = gemini_available()
     diagnostics = {
+        "ai_configured": use_ai,
+        "ai_used": False,
+        # Keep old keys for backwards compat
         "gemini_configured": use_ai,
         "gemini_used": False,
         "transcript_available": False,
@@ -192,6 +196,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         )
 
         if ai_result:
+            diagnostics["ai_used"] = True
             diagnostics["gemini_used"] = True
 
             if ai_result.get("summary"):
@@ -241,10 +246,15 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         asr_generated=video.asr_generated,
     )
 
-    # Collect actual Gemini API errors for diagnostics
-    gemini_errors = get_recent_errors()
-    if gemini_errors:
-        diagnostics["gemini_errors"] = gemini_errors
+    # Collect AI errors for diagnostics
+    ai_errors = get_recent_errors()
+    if ai_errors:
+        diagnostics["ai_errors"] = ai_errors
+
+    # Collect search errors for diagnostics
+    search_errors = get_search_errors()
+    if search_errors:
+        diagnostics["search_errors"] = search_errors
 
     logger.info("Pipeline concluído: %s", json.dumps(diagnostics, ensure_ascii=False))
 
