@@ -161,6 +161,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
         existing_chapters=video.chapters,
         transcript=video.transcript,
         duration=video.duration,
+        transcript_segments=video.transcript_segments,
     )
     fallback_topics = generate_topics(
         title=video.title,
@@ -193,6 +194,7 @@ def run_pipeline(youtube_url: str, work_dir: str | None = None) -> dict:
             existing_chapters=fallback_chapters,
             duration=video.duration,
             channel_name=video.channel,
+            transcript_segments=video.transcript_segments,
         )
 
         if ai_result:

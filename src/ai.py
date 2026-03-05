@@ -69,6 +69,7 @@ def generate_all_content(
     existing_chapters: list[dict],
     duration: int,
     channel_name: str,
+    transcript_segments: list[dict] | None = None,
 ) -> dict:
     """Generate ALL AI content in a SINGLE call.
 
@@ -86,6 +87,7 @@ def generate_all_content(
     prompt = _build_prompt(
         title, description, transcript, participant_names,
         existing_chapters, duration, channel_name,
+        transcript_segments=transcript_segments,
     )
 
     result_text = ""
@@ -120,10 +122,19 @@ def _build_prompt(
     existing_chapters: list[dict],
     duration: int,
     channel_name: str,
+    transcript_segments: list[dict] | None = None,
 ) -> str:
-    transcript_sample = transcript[:4000] if transcript else ""
     names = ", ".join(participant_names) if participant_names else "os participantes"
     duration_min = duration // 60
+
+    # Build timestamped transcript for the AI (much more useful than flat text)
+    transcript_ctx = ""
+    if transcript_segments:
+        # Sample segments evenly across the video (keep prompt manageable)
+        sampled = _sample_segments(transcript_segments, max_chars=5000)
+        transcript_ctx = "Transcrição com timestamps:\n" + sampled
+    elif transcript:
+        transcript_ctx = f"Trecho da transcrição: {transcript[:4000]}"
 
     chapters_ctx = ""
     if existing_chapters:
@@ -131,19 +142,21 @@ def _build_prompt(
             "Capítulos atuais (melhore os títulos, mantenha timestamps):\n"
             + "\n".join(f"{ch['start']}s - {ch['title']}" for ch in existing_chapters)
         )
-    elif transcript_sample:
+    else:
         chapters_ctx = (
-            f"Não há capítulos. Crie entre 5 e 10 com timestamps espaçados "
-            f"para um vídeo de {duration_min} minutos. "
-            f"Primeiro: 0s (Introdução), último: Conclusão."
+            f"Crie entre 5 e 10 capítulos baseados no CONTEÚDO REAL da transcrição. "
+            f"Use timestamps reais de quando cada assunto começa. "
+            f"Vídeo tem {duration_min} minutos ({duration}s). "
+            f"Primeiro: 0s (Introdução). Títulos devem descrever o assunto discutido."
         )
 
     participants_ctx = ""
     if participant_names:
         participants_ctx = (
-            "Para cada participante, descubra o cargo profissional (1-2 palavras) "
-            "e uma bio curta (até 15 palavras). "
-            "Se não souber, use role='Profissional' e bio='Participante do programa'.\n"
+            "Para cada participante, descubra o cargo profissional baseado no contexto "
+            "da conversa (1-2 palavras, ex: 'Advogado', 'Árbitro', 'Professora') "
+            "e uma bio curta (até 15 palavras) baseada no que a pessoa diz ou é apresentada. "
+            "Use o contexto da transcrição para descobrir os cargos.\n"
             f"Participantes: {names}"
         )
 
@@ -152,7 +165,7 @@ Podcast: '{title}'
 Canal: '{channel_name}'
 Duração: {duration_min} minutos
 Descrição original: {description[:500]}
-Trecho da transcrição: {transcript_sample}
+{transcript_ctx}
 
 Gere TUDO abaixo em um ÚNICO JSON:
 
@@ -169,6 +182,55 @@ Gere TUDO abaixo em um ÚNICO JSON:
    {participants_ctx}
 
 Responda APENAS o JSON, sem markdown, sem explicação, sem ```."""
+
+
+def _sample_segments(segments: list[dict], max_chars: int = 5000) -> str:
+    """Sample transcript segments evenly to fit within max_chars.
+
+    Groups segments into time windows and concatenates text,
+    producing lines like: [120s] text from this moment...
+    """
+    if not segments:
+        return ""
+
+    total_chars = sum(len(s["text"]) for s in segments)
+
+    # If it all fits, include everything
+    if total_chars <= max_chars:
+        lines = []
+        for seg in segments:
+            mins = seg["start"] // 60
+            secs = seg["start"] % 60
+            lines.append(f"[{mins:02d}:{secs:02d}] {seg['text']}")
+        return "\n".join(lines)
+
+    # Otherwise, sample evenly
+    # Group by 30-second windows
+    from collections import defaultdict
+    windows: dict[int, list[str]] = defaultdict(list)
+    for seg in segments:
+        window_key = (seg["start"] // 30) * 30
+        windows[window_key].append(seg["text"])
+
+    lines = []
+    char_count = 0
+    sorted_keys = sorted(windows.keys())
+
+    # Take every Nth window to fit
+    step = max(1, len(sorted_keys) * 50 // max_chars)
+
+    for i in range(0, len(sorted_keys), step):
+        key = sorted_keys[i]
+        text = " ".join(windows[key])[:200]
+        mins = key // 60
+        secs = key % 60
+        line = f"[{mins:02d}:{secs:02d}] {text}"
+        if char_count + len(line) > max_chars:
+            break
+        lines.append(line)
+        char_count += len(line)
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +325,12 @@ _openrouter_working_model: str | None = None
 
 
 def _call_openrouter(prompt: str) -> str:
-    """Call OpenRouter API with retry on rate limit."""
+    """Call OpenRouter API with retry on rate limit.
+
+    Rate limiting is per-account, so if one model is rate limited
+    we skip ALL models and return "" to let the provider chain
+    continue to Gemini.
+    """
     global _openrouter_working_model
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -274,6 +341,12 @@ def _call_openrouter(prompt: str) -> str:
 
     for model in models:
         result = _call_openrouter_with_retry(prompt, model, api_key)
+
+        if result == _RATE_LIMITED:
+            # Rate limit is per-account — no point trying other models
+            logger.warning("OpenRouter rate limited, pulando para próximo provider")
+            return ""
+
         if result is not None:
             _openrouter_working_model = model
             return result
@@ -282,6 +355,7 @@ def _call_openrouter(prompt: str) -> str:
 
 
 def _call_openrouter_with_retry(prompt: str, model: str, api_key: str) -> str | None:
+    """Returns text on success, None if model unavailable, _RATE_LIMITED if rate limited."""
     for attempt in range(_MAX_RETRIES + 1):
         result = _call_openrouter_single(prompt, model, api_key)
 
@@ -299,7 +373,7 @@ def _call_openrouter_with_retry(prompt: str, model: str, api_key: str) -> str | 
                 _recent_errors.append(
                     f"OpenRouter rate limit — tentou {_MAX_RETRIES + 1}x."
                 )
-                return None  # None = skip to next model/provider
+                return _RATE_LIMITED  # signal to caller to skip all models
 
         return result
 

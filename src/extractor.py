@@ -33,6 +33,7 @@ class VideoData:
     chapters: list = field(default_factory=list)
     tags: list = field(default_factory=list)
     transcript: str = ""
+    transcript_segments: list = field(default_factory=list)  # [{"start": seconds, "text": "..."}]
     asr_generated: bool = False
 
 
@@ -115,7 +116,7 @@ def _extract_via_api(youtube_url: str, api_key: str, out_path: Path) -> VideoDat
         )
 
     # Transcript via youtube-transcript-api
-    data.transcript, data.asr_generated = _fetch_transcript_api(video_id)
+    data.transcript, data.asr_generated, data.transcript_segments = _fetch_transcript_api(video_id)
 
     return data
 
@@ -195,14 +196,23 @@ def _timestamp_to_seconds(ts: str) -> int:
     return 0
 
 
-def _fetch_transcript_api(video_id: str) -> tuple[str, bool]:
+def _fetch_transcript_api(video_id: str) -> tuple[str, bool, list[dict]]:
     """Fetch transcript using youtube-transcript-api.
 
     Tries multiple language combinations and falls back to listing
     available transcripts.
 
-    Returns (transcript_text, asr_generated).
+    Returns (transcript_text, asr_generated, segments).
+    segments is a list of {"start": seconds, "text": "..."}.
     """
+    def _extract_segments(transcript_list) -> tuple[str, list[dict]]:
+        segments = []
+        texts = []
+        for snippet in transcript_list.snippets:
+            texts.append(snippet.text)
+            segments.append({"start": int(snippet.start), "text": snippet.text})
+        return " ".join(texts), segments
+
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -212,40 +222,38 @@ def _fetch_transcript_api(video_id: str) -> tuple[str, bool]:
         for langs in [["pt", "pt-BR", "en"], ["pt", "en"], ["es", "en"]]:
             try:
                 transcript_list = ytt_api.fetch(video_id, languages=langs)
-                text = " ".join(
-                    snippet.text for snippet in transcript_list.snippets
-                )
+                text, segments = _extract_segments(transcript_list)
                 if text.strip():
-                    logger.info("Transcrição obtida: %d chars (idiomas: %s)", len(text), langs)
-                    return text, False
+                    logger.info("Transcrição obtida: %d chars, %d segmentos (idiomas: %s)",
+                                len(text), len(segments), langs)
+                    return text, False, segments
             except Exception:
                 continue
 
         # Try 2: List all available transcripts and pick the best one
         try:
             transcript_list = ytt_api.list(video_id)
-            # Try manual transcripts first
             for t in transcript_list:
                 try:
                     fetched = ytt_api.fetch(video_id, languages=[t.language_code])
-                    text = " ".join(snippet.text for snippet in fetched.snippets)
+                    text, segments = _extract_segments(fetched)
                     if text.strip():
-                        logger.info("Transcrição obtida: %d chars (idioma: %s, auto: %s)",
-                                    len(text), t.language_code, t.is_generated)
-                        return text, t.is_generated
+                        logger.info("Transcrição obtida: %d chars, %d segmentos (idioma: %s, auto: %s)",
+                                    len(text), len(segments), t.language_code, t.is_generated)
+                        return text, t.is_generated, segments
                 except Exception:
                     continue
         except Exception as exc:
             logger.warning("Falha ao listar transcrições para %s: %s", video_id, exc)
 
         logger.warning("Nenhuma transcrição disponível para %s", video_id)
-        return "", False
+        return "", False, []
     except ImportError:
         logger.error("youtube-transcript-api não instalado")
-        return "", False
+        return "", False, []
     except Exception as exc:
         logger.warning("Falha ao obter transcrição para %s: %s", video_id, exc)
-        return "", False
+        return "", False, []
 
 
 # ---------------------------------------------------------------------------

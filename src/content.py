@@ -86,20 +86,160 @@ def generate_chapters(
     transcript: str,
     duration: int,
     max_chapters: int = 25,
+    transcript_segments: list[dict] | None = None,
 ) -> list[dict]:
-    """Return a list of chapters with start times and titles."""
+    """Return a list of chapters with start times and titles.
+
+    When transcript_segments are available (with timestamps), generates
+    chapters based on actual content by extracting key phrases from
+    each time window.
+    """
     if existing_chapters:
         return existing_chapters[:max_chapters]
 
     if duration <= 0:
         return [{"start": 0, "title": "Introdução"}]
 
+    # If we have timestamped segments, generate content-based chapters
+    if transcript_segments:
+        chapters = _generate_chapters_from_segments(
+            transcript_segments, duration, max_chapters
+        )
+        if len(chapters) >= 3:
+            return chapters
+
+    # Fallback: evenly spaced with topic hints from transcript
+    return _generate_generic_chapters(transcript, duration, max_chapters)
+
+
+def _generate_chapters_from_segments(
+    segments: list[dict],
+    duration: int,
+    max_chapters: int,
+) -> list[dict]:
+    """Generate chapters by analyzing transcript segments with timestamps.
+
+    Divides the video into time windows and extracts the most distinctive
+    phrase from each window to use as chapter title.
+    """
+    if not segments:
+        return []
+
+    # Determine number of chapters (roughly 1 per 4-5 min, min 5, max 12)
+    num_chapters = max(5, min(12, duration // 240))
+    window_size = duration // num_chapters
+
+    chapters = [{"start": 0, "title": "Introdução"}]
+
+    for i in range(1, num_chapters):
+        window_start = i * window_size
+        window_end = window_start + window_size
+
+        # Collect text from segments in this time window
+        window_text = " ".join(
+            seg["text"] for seg in segments
+            if window_start <= seg["start"] < window_end
+        )
+
+        if window_text.strip():
+            title = _extract_chapter_title(window_text)
+        else:
+            title = f"Parte {i + 1}"
+
+        chapters.append({"start": window_start, "title": title})
+
+    # Conclusion near the end
+    if chapters[-1]["start"] < duration - 90:
+        # Get text from last 2 min
+        last_text = " ".join(
+            seg["text"] for seg in segments
+            if seg["start"] >= duration - 120
+        )
+        if last_text and any(w in last_text.lower() for w in
+                            ["obrigado", "obrigada", "concluir", "finalizar",
+                             "encerrar", "agradec", "até a próxima", "tchau"]):
+            chapters.append({"start": duration - 60, "title": "Encerramento"})
+        else:
+            chapters.append({"start": duration - 60, "title": "Considerações finais"})
+
+    return chapters
+
+
+def _extract_chapter_title(window_text: str, max_words: int = 6) -> str:
+    """Extract a meaningful chapter title from a transcript window.
+
+    Looks for topic-indicating phrases, noun phrases, or key terms.
+    """
+    text = window_text.strip()
+    if not text:
+        return "Continuação"
+
+    # Look for explicit topic mentions
+    topic_patterns = [
+        r"(?:vamos (?:falar|conversar|tratar)) (?:sobre|de|do|da) ([^,.!?]{5,50})",
+        r"(?:o (?:tema|assunto|ponto|tópico)) (?:é|aqui é|de hoje) ([^,.!?]{5,50})",
+        r"(?:a questão|a pergunta) (?:é|que) ([^,.!?]{5,50})",
+        r"(?:quando (?:a gente|nós|eu)) (?:fala|pensa|olha) (?:de|para|sobre) ([^,.!?]{5,50})",
+        r"(?:importância|importa(?:nte|ncia)) (?:de|da|do) ([^,.!?]{5,50})",
+    ]
+    for pat in topic_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            phrase = m.group(1).strip()
+            words = phrase.split()[:max_words]
+            return " ".join(words).capitalize()
+
+    # Extract most frequent meaningful bigrams/trigrams as title
+    words = re.findall(r"[a-záàâãéèêíïóôõúüç]{4,}", text.lower())
+
+    stop = {
+        "para", "como", "mais", "está", "isso", "esse", "essa", "então",
+        "porque", "quando", "onde", "qual", "cada", "todo", "toda", "muito",
+        "mesmo", "ainda", "sobre", "pode", "entre", "você", "vocês", "nosso",
+        "também", "fazer", "falar", "gente", "tinha", "seria", "vamos",
+        "tipo", "acho", "vezes", "forma", "assim", "aqui", "aquele",
+        "dizer", "saber", "coisa", "coisas", "parte", "ponto",
+        "tudo", "nada", "outro", "outra", "depois", "antes", "agora",
+        "sempre", "nunca", "desse", "dessa", "nesse", "nessa", "dele", "dela",
+        "pelo", "pela", "numa", "algo", "olha", "bom", "boa",
+    }
+    meaningful = [w for w in words if w not in stop]
+
+    if not meaningful:
+        return "Continuação"
+
+    # Count word frequency in this window
+    counter = Counter(meaningful)
+
+    # Take top 2-3 most frequent words and form a title
+    top_words = [w for w, _ in counter.most_common(5)]
+
+    # Try to find a bigram from the text that contains a top word
+    bigrams = []
+    for i in range(len(meaningful) - 1):
+        if meaningful[i] in top_words[:3] or meaningful[i + 1] in top_words[:3]:
+            bigram = f"{meaningful[i]} {meaningful[i + 1]}"
+            bigrams.append(bigram)
+
+    if bigrams:
+        # Pick the most common bigram
+        bigram_counter = Counter(bigrams)
+        best = bigram_counter.most_common(1)[0][0]
+        return best.capitalize()
+
+    # Just use top word
+    return top_words[0].capitalize() if top_words else "Continuação"
+
+
+def _generate_generic_chapters(
+    transcript: str, duration: int, max_chapters: int
+) -> list[dict]:
+    """Fallback: evenly spaced chapters with topic hints."""
     interval = 240  # 4 minutes
     chapters = [{"start": 0, "title": "Introdução"}]
 
     topic_hints = _extract_topic_hints(transcript)
 
-    # Generic section names for when there are no topic hints
     generic_titles = [
         "Contexto e cenário atual",
         "Desenvolvimento do tema",
@@ -128,7 +268,6 @@ def generate_chapters(
         chapters.append({"start": current, "title": title})
         current += interval
 
-    # Add a conclusion chapter near the end
     if duration > 0 and chapters[-1]["start"] < duration - 60:
         chapters.append({"start": duration - 60, "title": "Conclusão"})
 
