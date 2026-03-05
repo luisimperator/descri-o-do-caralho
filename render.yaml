@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: descricao-arbitragem
+    runtime: docker
+    plan: free
+    envVars:
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: GOOGLE_CSE_ID
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
