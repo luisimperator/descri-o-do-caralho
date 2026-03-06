@@ -397,32 +397,121 @@ def _pick_ocr_spelling(name: str, ocr_text: str) -> str | None:
 def _web_search_all(name: str, context: str = "") -> str:
     """Try all search sources in order, with caching.
 
+    Adds channel/topic context to queries to disambiguate common names.
+    Validates results to reject wrong-person matches.
     Returns combined snippet text or empty string.
     """
     cache_key = name.lower().strip()
     if cache_key in _search_cache:
         return _search_cache[cache_key]
 
-    query = f"{name} {context}".strip()
+    # Build a context-enriched query to avoid homonym confusion
+    # e.g. "João Manoel advogado arbitragem Canal Arbitragem"
+    context_terms = _build_search_context(context)
+    query_with_context = f"{name} {context_terms}".strip()
+    query_basic = f"{name} {context}".strip()
+
     snippet = ""
 
-    # 1. Google Custom Search (needs key)
-    snippet = _search_google_api(query)
+    # 1. Google Custom Search (needs key) — use enriched query
+    snippet = _search_google_api(query_with_context)
 
-    # 2. Wikipedia PT (free, reliable)
+    # 2. Wikipedia PT (free, reliable) — use enriched query
     if not snippet:
-        snippet = _search_wikipedia(name)
+        snippet = _search_wikipedia(f"{name} {context_terms}")
 
     # 3. DuckDuckGo Instant Answer API (free, structured)
     if not snippet:
-        snippet = _search_duckduckgo_api(name)
+        snippet = _search_duckduckgo_api(query_with_context)
 
     # 4. DuckDuckGo HTML scraping (last resort)
     if not snippet:
-        snippet = _search_duckduckgo(query)
+        snippet = _search_duckduckgo(query_with_context)
+
+    # Validate: reject results that clearly describe a different person
+    if snippet and not _snippet_matches_context(snippet, name, context):
+        logger.warning(
+            "Busca para '%s' rejeitada — resultado não combina com contexto '%s': %s",
+            name, context, snippet[:120],
+        )
+        snippet = ""
 
     _search_cache[cache_key] = snippet
     return snippet
+
+
+# Words that indicate the search found the WRONG person
+_WRONG_PERSON_INDICATORS = {
+    "sacerdote", "padre", "bispo", "cardeal", "papa",
+    "cantor", "cantora", "músico", "música", "banda", "álbum", "disco",
+    "ator", "atriz", "filme", "novela", "telenovela", "série",
+    "jogador", "futebol", "seleção", "gol", "campeonato",
+    "imperador", "rei", "rainha", "príncipe", "princesa",
+    "santo", "santa", "beato", "beata", "mártir",
+    "compositor", "cineasta",
+}
+
+# Words that confirm the person matches legal/arbitration context
+_RIGHT_PERSON_INDICATORS = {
+    "advogado", "advogada", "árbitro", "árbitra", "arbitragem",
+    "direito", "jurídico", "jurídica", "juiz", "juíza",
+    "mediador", "mediadora", "mediação",
+    "procurador", "procuradora", "promotor", "promotora",
+    "tribunal", "vara", "câmara", "oab", "escritório",
+    "contrato", "litígio", "disputa", "cláusula",
+    "professor", "professora", "mestre", "doutor", "doutora",
+    "consultor", "consultora", "gestor", "gestora",
+    "engenheiro", "engenheira", "empresário", "empresária",
+    "especialista", "perito", "perita",
+}
+
+
+def _snippet_matches_context(snippet: str, name: str, context: str) -> bool:
+    """Check if a search snippet actually describes the right person.
+
+    Rejects results that clearly describe a different person (e.g.,
+    a historical military figure instead of a lawyer).
+    """
+    text_lower = snippet.lower()
+    context_lower = context.lower()
+
+    # Check for wrong-person indicators
+    wrong_count = sum(1 for w in _WRONG_PERSON_INDICATORS if w in text_lower)
+    right_count = sum(1 for w in _RIGHT_PERSON_INDICATORS if w in text_lower)
+
+    # Also check if channel name context words appear
+    context_words = set(context_lower.split())
+    context_match = any(w in text_lower for w in context_words if len(w) > 3)
+
+    # If snippet has wrong indicators and NO right indicators → reject
+    if wrong_count > 0 and right_count == 0 and not context_match:
+        return False
+
+    # If snippet has more wrong than right indicators → reject
+    if wrong_count > right_count and not context_match:
+        return False
+
+    return True
+
+
+def _build_search_context(channel_name: str) -> str:
+    """Build search context terms from channel name.
+
+    For channels about arbitration/law, adds relevant legal terms
+    to help disambiguation.
+    """
+    channel_lower = channel_name.lower()
+
+    # Detect channel topic and add relevant search terms
+    legal_keywords = ["arbitragem", "direito", "jurídic", "advogad", "mediação",
+                      "tribunal", "legal", "law", "arbitrat"]
+    is_legal = any(kw in channel_lower for kw in legal_keywords)
+
+    if is_legal:
+        return f"advogado arbitragem direito {channel_name}"
+
+    # For other channels, just use the channel name
+    return channel_name
 
 
 def _google_canonise(name: str, context: str) -> str | None:
@@ -688,6 +777,33 @@ def _search_duckduckgo(query: str) -> str:
 
 
 
+def _clean_bio_text(text: str) -> str:
+    """Clean garbage from bio text: emojis, @handles, URLs, years, etc."""
+    # Remove emojis (Unicode emoji ranges)
+    text = re.sub(
+        r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0000FE00-\U0000FE0F"
+        r"\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0"
+        r"\U0000200D\U0000FE0F]+", " ", text
+    )
+    # Remove @handles
+    text = re.sub(r"@\w+", "", text)
+    # Remove URLs
+    text = re.sub(r"https?://\S+", "", text)
+    # Remove standalone years like (1991) or "1834–1923"
+    text = re.sub(r"\(\d{4}\)", "", text)
+    text = re.sub(r"\b\d{4}\s*[–—-]\s*\d{4}\b", "", text)
+    # Remove ALL_CAPS words that are likely acronyms/noise (except known ones)
+    text = re.sub(r"\b[A-Z]{4,}\b", "", text)
+    # Remove hashtags
+    text = re.sub(r"#\w+", "", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    # Remove leading/trailing punctuation junk
+    text = re.sub(r"^[\s,\-–—:;|]+", "", text)
+    text = re.sub(r"[\s,\-–—:;|]+$", "", text)
+    return text
+
+
 def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
     """Extract a short bio-like sentence from a search snippet."""
     # Build role alternatives from the keywords list
@@ -711,15 +827,17 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
     for pat in bio_patterns:
         m = re.search(pat, snippet, re.IGNORECASE)
         if m:
-            text = m.group(0).strip()
+            text = _clean_bio_text(m.group(0).strip())
             words = text.split()[:max_words]
-            return " ".join(words)
+            bio = " ".join(words)
+            if len(bio.split()) >= 2:
+                return bio
 
-    # Fallback: take the first sentence-like chunk
+    # Fallback: take the first clean sentence-like chunk
     sentences = re.split(r"[.!?]", snippet)
     for s in sentences:
-        s = s.strip()
-        if 5 <= len(s.split()) <= 15:
+        s = _clean_bio_text(s.strip())
+        if 3 <= len(s.split()) <= 15:
             words = s.split()[:max_words]
             return " ".join(words)
 
