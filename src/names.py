@@ -456,8 +456,13 @@ def _search_google_api(query: str) -> str:
             data = json.loads(resp.read().decode("utf-8"))
 
         items = data.get("items", [])
+        total = data.get("searchInformation", {}).get("totalResults", "?")
         if not items:
-            logger.debug("Google API: sem resultados para '%s'", query)
+            msg = (f"Google Search: 0 resultados (totalResults={total}) "
+                   f"— verifique se o CSE tem 'Search the entire web' habilitado")
+            logger.warning("Google API: 0 resultados para '%s' (total=%s)", query, total)
+            if msg not in _search_errors:
+                _search_errors.append(msg)
             return ""
 
         # Combine titles and snippets from results
@@ -483,7 +488,11 @@ def _search_google_api(query: str) -> str:
             pass
         err_msg = f"Google Search HTTP {exc.code}"
         if exc.code == 403:
-            err_msg = "Google Search 403 — Custom Search API não habilitada no projeto Google Cloud"
+            err_msg = (f"Google Search 403 — API habilitada mas acesso negado. "
+                       f"Possíveis causas: quota esgotada (100/dia), "
+                       f"API key sem permissão para Custom Search, "
+                       f"ou restrições de IP/referrer na key. "
+                       f"Detalhe: {error_body[:150]}")
         elif exc.code == 400:
             err_msg = f"Google Search 400 — verifique GOOGLE_CSE_ID: {error_body[:100]}"
         else:
