@@ -14,11 +14,18 @@ logger = logging.getLogger(__name__)
 # Track search errors for diagnostics
 _search_errors: list[str] = []
 
+# Cache search results to avoid duplicate API calls
+_search_cache: dict[str, str] = {}
+
+# Flag to skip Google API after first fatal error (403, etc.)
+_google_api_disabled = False
+
 
 def get_search_errors() -> list[str]:
     """Return and clear recent search errors for diagnostics."""
     errors = list(_search_errors)
     _search_errors.clear()
+    _search_cache.clear()
     return errors
 
 
@@ -208,32 +215,27 @@ def generate_mini_bio(
     channel_name: str,
     description: str = "",
 ) -> tuple[str, str]:
-    """Create an 8-12 word mini-biography via Google search.
+    """Create an 8-12 word mini-biography via web search.
 
-    Uses Google Custom Search JSON API (GOOGLE_CSE_ID + GOOGLE_API_KEY).
-    Falls back to DuckDuckGo and description parsing if not configured.
+    Tries multiple sources in order:
+      1. Google Custom Search API (if configured)
+      2. Wikipedia PT API (free, no key needed)
+      3. DuckDuckGo Instant Answer API (free, no key needed)
+      4. DuckDuckGo HTML scraping (fallback)
+      5. Video description parsing (offline)
 
     Returns (role, bio). Falls back to defaults on failure.
     """
-    # 1. Google Custom Search API (official, works from servers)
-    snippet = _search_google_api(f"{name} {channel_name}")
+    # Use cached unified search (same call used by canonise)
+    snippet = _web_search_all(name, channel_name)
     if snippet:
         role = _extract_role(snippet)
         bio = _summarise_snippet(snippet, max_words=12)
         if role or bio:
-            logger.info("Google API bio for '%s': role=%s", name, role)
+            logger.info("Web bio for '%s': role=%s, bio=%s", name, role, bio[:50])
             return role, bio or "Participante do programa"
 
-    # 2. DuckDuckGo web search (fallback, no API key)
-    snippet = _search_duckduckgo(f"{name} {channel_name}")
-    if snippet:
-        role = _extract_role(snippet)
-        bio = _summarise_snippet(snippet, max_words=12)
-        if role or bio:
-            logger.info("DuckDuckGo bio for '%s': role=%s", name, role)
-            return role, bio or "Participante do programa"
-
-    # 3. Extract from video description (offline)
+    # Fallback: extract from video description (offline, no network)
     if description:
         role, bio = extract_role_from_description(name, description)
         if role:
@@ -392,11 +394,40 @@ def _pick_ocr_spelling(name: str, ocr_text: str) -> str | None:
     return None
 
 
-def _google_canonise(name: str, context: str) -> str | None:
-    """Search Google for the canonical spelling of a name."""
-    snippet = _search_google_api(f"{name} {context}")
+def _web_search_all(name: str, context: str = "") -> str:
+    """Try all search sources in order, with caching.
+
+    Returns combined snippet text or empty string.
+    """
+    cache_key = name.lower().strip()
+    if cache_key in _search_cache:
+        return _search_cache[cache_key]
+
+    query = f"{name} {context}".strip()
+    snippet = ""
+
+    # 1. Google Custom Search (needs key)
+    snippet = _search_google_api(query)
+
+    # 2. Wikipedia PT (free, reliable)
     if not snippet:
-        snippet = _search_duckduckgo(f"{name} {context}")
+        snippet = _search_wikipedia(name)
+
+    # 3. DuckDuckGo Instant Answer API (free, structured)
+    if not snippet:
+        snippet = _search_duckduckgo_api(name)
+
+    # 4. DuckDuckGo HTML scraping (last resort)
+    if not snippet:
+        snippet = _search_duckduckgo(query)
+
+    _search_cache[cache_key] = snippet
+    return snippet
+
+
+def _google_canonise(name: str, context: str) -> str | None:
+    """Search web for the canonical spelling of a name."""
+    snippet = _web_search_all(name, context)
     if not snippet:
         return None
 
@@ -408,6 +439,98 @@ def _google_canonise(name: str, context: str) -> str | None:
     return name  # Confirmed existence, keep original spelling
 
 
+def _search_wikipedia(name: str) -> str:
+    """Search Portuguese Wikipedia API. Free, no key, works from any server."""
+    # Try PT Wikipedia first, then EN
+    for lang in ("pt", "en"):
+        try:
+            params = urllib.parse.urlencode({
+                "action": "query",
+                "list": "search",
+                "srsearch": name,
+                "format": "json",
+                "srlimit": "3",
+                "srprop": "snippet",
+                "utf8": "1",
+            })
+            url = f"https://{lang}.wikipedia.org/w/api.php?{params}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "DescricaoArbitragem/1.0 (bot; educational)"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            results = data.get("query", {}).get("search", [])
+            if not results:
+                continue
+
+            # Combine snippets, clean HTML
+            texts = []
+            for r in results:
+                snippet = r.get("snippet", "")
+                clean = re.sub(r"<[^>]+>", " ", snippet)
+                clean = re.sub(r"\s+", " ", clean).strip()
+                if clean:
+                    texts.append(clean)
+
+            if texts:
+                result = " ".join(texts)
+                logger.info("Wikipedia (%s) OK para '%s': %d chars de %d results",
+                            lang, name, len(result), len(results))
+                return result[:2000]
+
+        except Exception as exc:
+            logger.debug("Wikipedia (%s) falhou para '%s': %s", lang, name, exc)
+
+    return ""
+
+
+def _search_duckduckgo_api(name: str) -> str:
+    """Search DuckDuckGo Instant Answer API. Free, no key, structured data."""
+    try:
+        params = urllib.parse.urlencode({
+            "q": name,
+            "format": "json",
+            "no_html": "1",
+            "skip_disambig": "1",
+        })
+        url = f"https://api.duckduckgo.com/?{params}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "DescricaoArbitragem/1.0 (bot; educational)"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        texts = []
+        # Abstract (main result)
+        abstract = data.get("Abstract", "")
+        if abstract:
+            texts.append(abstract)
+        # AbstractText (plain text)
+        abstract_text = data.get("AbstractText", "")
+        if abstract_text and abstract_text != abstract:
+            texts.append(abstract_text)
+        # Related topics
+        for topic in data.get("RelatedTopics", [])[:3]:
+            text = topic.get("Text", "")
+            if text:
+                texts.append(text)
+
+        if texts:
+            result = " ".join(texts)
+            logger.info("DDG API OK para '%s': %d chars", name, len(result))
+            return result[:2000]
+
+        logger.debug("DDG API: sem resultados para '%s'", name)
+        return ""
+
+    except Exception as exc:
+        logger.debug("DDG API falhou para '%s': %s", name, exc)
+        return ""
+
+
 def _search_google_api(query: str) -> str:
     """Search Google via Custom Search JSON API.
 
@@ -416,25 +539,20 @@ def _search_google_api(query: str) -> str:
       - GOOGLE_CSE_ID:  Programmable Search Engine ID (cx)
 
     Free tier: 100 queries/day. Works from any server, no captcha.
-
-    Setup:
-      1. console.cloud.google.com → enable "Custom Search API"
-      2. programmablesearchengine.google.com → create engine
-         (add sites like wikipedia.org, linkedin.com, etc.)
-      3. Copy the Search engine ID → set as GOOGLE_CSE_ID in Railway
-      4. GOOGLE_API_KEY falls back to YOUTUBE_API_KEY automatically
+    Automatically disables after first 403 to avoid wasting time.
     """
+    global _google_api_disabled
+
+    if _google_api_disabled:
+        return ""
+
     api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
     if not api_key:
         # Fall back to YOUTUBE_API_KEY — same Google Cloud project
         api_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
     cse_id = os.environ.get("GOOGLE_CSE_ID", "").strip()
 
-    if not api_key:
-        logger.warning("Google Custom Search: sem API key (GOOGLE_API_KEY nem YOUTUBE_API_KEY)")
-        return ""
-    if not cse_id:
-        logger.warning("Google Custom Search: GOOGLE_CSE_ID não configurado")
+    if not api_key or not cse_id:
         return ""
 
     logger.info("Google API: buscando '%s' (key=%s... cx=%s...)",
@@ -488,10 +606,10 @@ def _search_google_api(query: str) -> str:
             pass
         err_msg = f"Google Search HTTP {exc.code}"
         if exc.code == 403:
-            err_msg = (f"Google Search 403 — API habilitada mas acesso negado. "
-                       f"Possíveis causas: quota esgotada (100/dia), "
-                       f"API key sem permissão para Custom Search, "
-                       f"ou restrições de IP/referrer na key. "
+            _google_api_disabled = True
+            err_msg = (f"Google Search 403 — Custom Search API não habilitada "
+                       f"neste projeto. Habilite em console.cloud.google.com → "
+                       f"APIs → Custom Search JSON API. "
                        f"Detalhe: {error_body[:150]}")
         elif exc.code == 400:
             err_msg = f"Google Search 400 — verifique GOOGLE_CSE_ID: {error_body[:100]}"
@@ -527,26 +645,36 @@ def _search_duckduckgo(query: str) -> str:
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
-        # Extract result snippets (class="result__snippet")
-        snippets = re.findall(
-            r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL
-        )
-        if not snippets:
-            # Fallback: try extracting from result bodies
-            snippets = re.findall(
-                r'class="result__body"[^>]*>(.*?)</div>', html, re.DOTALL
-            )
+        # Try multiple patterns — DDG changes HTML structure
+        snippets = []
+        for pattern in [
+            r'class="result__snippet"[^>]*>(.*?)</a>',
+            r'class="result__snippet"[^>]*>(.*?)</span>',
+            r'class="result__snippet"[^>]*>(.*?)</div>',
+            r'class="result__body"[^>]*>(.*?)</div>',
+            # Lite version pattern
+            r'class="result-snippet"[^>]*>(.*?)</[a-z]',
+        ]:
+            snippets = re.findall(pattern, html, re.DOTALL)
+            if snippets:
+                break
 
         if not snippets:
-            logger.debug("DuckDuckGo: nenhum snippet para '%s'", query)
+            # Last resort: extract any text between result markers
+            snippets = re.findall(r'snippet["\s][^>]*>(.*?)</', html, re.DOTALL)
+
+        if not snippets:
+            logger.warning("DuckDuckGo: nenhum snippet para '%s' (html=%d bytes)",
+                           query, len(html))
             return ""
 
         # Clean HTML tags and join snippets
         texts = []
         for s in snippets[:5]:
             clean = re.sub(r"<[^>]+>", " ", s)
+            clean = re.sub(r"&[a-zA-Z]+;", " ", clean)  # HTML entities
             clean = re.sub(r"\s+", " ", clean).strip()
-            if clean:
+            if clean and len(clean) > 10:
                 texts.append(clean)
 
         result = " ".join(texts)
@@ -554,7 +682,7 @@ def _search_duckduckgo(query: str) -> str:
         return result[:2000]
 
     except Exception as exc:
-        logger.debug("DuckDuckGo falhou para '%s': %s", query, exc)
+        logger.warning("DuckDuckGo falhou para '%s': %s", query, exc)
         return ""
 
 
