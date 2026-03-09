@@ -366,6 +366,18 @@ def _extract_position_company(snippet: str, name: str) -> str:
             raw = re.sub(r"[\s,\-–—:;|]+$", "", raw)
             # Normalize English prepositions to Portuguese
             raw = re.sub(r"\bat\b", "no", raw, count=1)
+            # Reject YouTube UI junk
+            if _is_youtube_ui_junk(raw):
+                continue
+            # Reject if contains country name as pseudo-company
+            # e.g. "Diretora, BRASIL, OAB-SP" — BRASIL is not a company
+            if re.search(r"\bBRASIL\b|\bBRAZIL\b|\bPORTUGAL\b", raw, re.IGNORECASE):
+                # Strip the country and OAB stuff, keep just the role
+                role_only = _extract_role(raw)
+                if role_only:
+                    raw = role_only
+                else:
+                    continue
             # Limit to ~8 words max for a clean position title
             words = raw.split()
             if words and len(words) <= 10:
@@ -717,10 +729,14 @@ _WRONG_PERSON_INDICATORS = {
     "sacerdote", "padre", "bispo", "cardeal", "papa",
     "cantor", "cantora", "músico", "música", "banda", "álbum", "disco",
     "ator", "atriz", "filme", "novela", "telenovela", "série",
-    "jogador", "futebol", "seleção", "gol", "campeonato",
+    "jogador", "jogadora", "futebol", "seleção", "gol", "campeonato",
+    "classificando", "quartas de final", "semifinal", "final",
+    "enfrentar", "boca juniors", "libertadores", "copa do mundo",
     "imperador", "rei", "rainha", "príncipe", "princesa",
     "santo", "santa", "beato", "beata", "mártir",
     "compositor", "cineasta",
+    "prefeito", "prefeita", "governador", "governadora",
+    "vereador", "vereadora", "deputado", "deputada",
 }
 
 # Words that confirm the person matches legal/arbitration context
@@ -742,10 +758,14 @@ def _snippet_matches_context(snippet: str, name: str, context: str) -> bool:
     """Check if a search snippet actually describes the right person.
 
     Rejects results that clearly describe a different person (e.g.,
-    a historical military figure instead of a lawyer).
+    a historical military figure instead of a lawyer) and YouTube UI junk.
     """
     text_lower = snippet.lower()
     context_lower = context.lower()
+
+    # Reject YouTube UI garbage
+    if _is_youtube_ui_junk(snippet):
+        return False
 
     # Check for wrong-person indicators
     wrong_count = sum(1 for w in _WRONG_PERSON_INDICATORS if w in text_lower)
@@ -1101,6 +1121,47 @@ def _summarise_snippet_excluding(snippet: str, exclude: str, max_words: int = 12
     return best
 
 
+_YOUTUBE_UI_JUNK = [
+    "seja notificado",
+    "notificado a cada",
+    "a cada atualização",
+    "inscreva-se",
+    "inscreva se",
+    "se inscreva",
+    "ative o sininho",
+    "ative as notificações",
+    "clique no sininho",
+    "curtir e compartilhar",
+    "deixe seu like",
+    "deixe o like",
+    "link na descrição",
+    "link na bio",
+    "sigam no instagram",
+    "siga no instagram",
+    "siga nas redes",
+    "redes sociais",
+    "nos acompanhe",
+    "compartilhe o vídeo",
+    "compartilhe este vídeo",
+    "subscribe",
+    "notification bell",
+    "turn on notifications",
+    "like and subscribe",
+    "mostrar menos",
+    "mostrar mais",
+    "show less",
+    "show more",
+    "leia mais",
+    "saiba mais",
+]
+
+
+def _is_youtube_ui_junk(text: str) -> bool:
+    """Check if text is YouTube UI/CTA garbage rather than real content."""
+    text_lower = text.lower().strip()
+    return any(junk in text_lower for junk in _YOUTUBE_UI_JUNK)
+
+
 def _clean_bio_text(text: str) -> str:
     """Clean garbage from bio text: emojis, @handles, URLs, years, etc."""
     # Remove emojis (Unicode emoji ranges)
@@ -1159,19 +1220,25 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
         m = re.search(pat, snippet, re.IGNORECASE)
         if m:
             text = _clean_bio_text(m.group(0).strip())
+            if _is_youtube_ui_junk(text):
+                continue
             words = text.split()[:max_words]
             bio = " ".join(words)
             # Don't end on articles/prepositions
             bio = re.sub(r"\s+(?:e|em|de|do|da|na|no|com|para|a|o|as|os|que|um|uma)\s*$", "", bio)
-            if len(bio.split()) >= 2:
+            if len(bio.split()) >= 2 and not _is_youtube_ui_junk(bio):
                 return bio
 
     # Fallback: take the first clean sentence-like chunk
     sentences = re.split(r"[.!?]", snippet)
     for s in sentences:
         s = _clean_bio_text(s.strip())
+        if _is_youtube_ui_junk(s):
+            continue
         if 3 <= len(s.split()) <= 15:
             words = s.split()[:max_words]
-            return " ".join(words)
+            result = " ".join(words)
+            if not _is_youtube_ui_junk(result):
+                return result
 
     return ""
