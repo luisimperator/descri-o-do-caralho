@@ -464,16 +464,19 @@ def _merge_split_names(candidates: list[str], source_text: str) -> list[str]:
     E.g. ["João Manoel", "Lima Junior"] → ["João Manoel Lima Junior"]
     if "João Manoel Lima Junior" appears in any source text.
 
-    Also handles:
-    - Suffix merging: "Lima Junior" alone → try to find full name
-    - Substring absorption: if "João Manoel" is part of "João Manoel Lima Junior"
+    Strategy (in order):
+    1. Direct concatenation: check if "A B" exists in source text
+    2. Connector merge: check if "A de B" exists in source text
+    3. Suffix extension: if name ends with Junior/Filho/Neto, scan backwards
+    4. Proximity merge: if two candidates appear within 3 words of each other
+       in the same sentence, merge them
     """
     if len(candidates) < 2:
         return candidates
 
     source_lower = source_text.lower()
     merged: list[str] = []
-    absorbed: set[int] = set()  # indices of candidates absorbed into another
+    absorbed: set[int] = set()
 
     for i, name_a in enumerate(candidates):
         if i in absorbed:
@@ -485,38 +488,46 @@ def _merge_split_names(candidates: list[str], source_text: str) -> list[str]:
             if j <= i or j in absorbed:
                 continue
 
-            # Try combining in both orders
+            # Strategy 1: Direct concatenation
+            found = False
             for combo in [f"{name_a} {name_b}", f"{name_b} {name_a}"]:
                 combo_lower = combo.lower()
-                # Check if the combined name exists in any source
                 if combo_lower in source_lower:
-                    # Pick the version from the source text for correct casing
                     idx = source_lower.index(combo_lower)
                     best = source_text[idx:idx + len(combo)]
                     absorbed.add(j)
                     logger.info("Merged names: '%s' + '%s' → '%s'", name_a, name_b, best)
+                    found = True
                     break
+            if found:
+                continue
 
-            # Also try with connectors: "João Manoel de Lima Junior"
-            if j not in absorbed:
-                for conn in _NAME_CONNECTORS:
-                    for combo in [f"{name_a} {conn} {name_b}", f"{name_b} {conn} {name_a}"]:
-                        combo_lower = combo.lower()
-                        if combo_lower in source_lower:
-                            idx = source_lower.index(combo_lower)
-                            best = source_text[idx:idx + len(combo)]
-                            absorbed.add(j)
-                            logger.info("Merged names with connector: '%s' + '%s' → '%s'",
-                                        name_a, name_b, best)
-                            break
-                    if j in absorbed:
+            # Strategy 2: Connector merge ("de", "da", "do")
+            for conn in _NAME_CONNECTORS:
+                for combo in [f"{name_a} {conn} {name_b}", f"{name_b} {conn} {name_a}"]:
+                    combo_lower = combo.lower()
+                    if combo_lower in source_lower:
+                        idx = source_lower.index(combo_lower)
+                        best = source_text[idx:idx + len(combo)]
+                        absorbed.add(j)
+                        logger.info("Merged names with connector: '%s' + '%s' → '%s'",
+                                    name_a, name_b, best)
                         break
+                if j in absorbed:
+                    break
+            if j in absorbed:
+                continue
 
-        # Check if a standalone suffix-name should be absorbed
+            # Strategy 4: Proximity merge — if A and B appear close in same line
+            proximity_result = _try_proximity_merge(name_a, name_b, source_text)
+            if proximity_result:
+                best = proximity_result
+                absorbed.add(j)
+                logger.info("Proximity merged: '%s' + '%s' → '%s'", name_a, name_b, best)
+
+        # Strategy 3: Suffix extension for standalone suffix names
         last_word = best.split()[-1].lower()
         if last_word in _NAME_SUFFIXES and len(best.split()) <= 2:
-            # This looks like just a suffix fragment (e.g. "Lima Junior")
-            # Try to find it as part of a longer name in source text
             longer = _find_longer_name_in_text(best, source_text)
             if longer and longer.lower() != best.lower():
                 best = longer
@@ -524,48 +535,98 @@ def _merge_split_names(candidates: list[str], source_text: str) -> list[str]:
 
         merged.append(best)
 
-    # Deduplicate again after merging
     return _deduplicate(merged)
+
+
+def _try_proximity_merge(name_a: str, name_b: str, source_text: str) -> str | None:
+    """Try to merge two names if they appear close together in source text.
+
+    Looks for patterns where name_a and name_b are within 0-2 words
+    of each other on the same line (allowing connectors like "de").
+    """
+    a_lower = name_a.lower()
+    b_lower = name_b.lower()
+
+    for line in source_text.splitlines():
+        line_lower = line.lower()
+        # Check both orders
+        for first, second, first_orig, second_orig in [
+            (a_lower, b_lower, name_a, name_b),
+            (b_lower, a_lower, name_b, name_a),
+        ]:
+            idx_first = line_lower.find(first)
+            if idx_first < 0:
+                continue
+            idx_second = line_lower.find(second, idx_first + len(first))
+            if idx_second < 0:
+                continue
+
+            # What's between them?
+            between = line[idx_first + len(first):idx_second].strip()
+            between_words = between.split()
+
+            # Allow 0 words (adjacent) or 1-2 connector words (de, da, do)
+            if len(between_words) == 0:
+                # Adjacent: "João Manoel Lima Junior" — already handled by strategy 1
+                continue
+            if (len(between_words) <= 2 and
+                    all(w.lower() in _NAME_CONNECTORS for w in between_words)):
+                # Connector: "Maria Clara de Souza Lima"
+                full = line[idx_first:idx_second + len(second)]
+                words = full.split()
+                if 3 <= len(words) <= 7:
+                    return full
+
+    return None
 
 
 def _find_longer_name_in_text(short_name: str, text: str) -> str | None:
     """Find a longer version of a name in source text.
 
     E.g. given "Lima Junior", finds "João Manoel Lima Junior" in the text.
+    Scans backwards from the short name, skipping over non-name words
+    to find preceding capitalized words.
     """
     short_lower = short_name.lower()
-    text_lower = text.lower()
 
-    # Find all occurrences of the short name
-    idx = text_lower.find(short_lower)
-    while idx >= 0:
-        # Look backwards for more capitalized words
-        start = idx
-        before = text[:start].rstrip()
-        # Grab preceding capitalized words (and connectors like "de", "da")
-        extra_words: list[str] = []
-        for word in reversed(before.split()):
-            if (word and word[0].isupper() and
-                    re.match(r"^[A-ZÀ-Ü][a-zà-ü]+$", word)):
-                extra_words.insert(0, word)
-            elif word.lower() in _NAME_CONNECTORS:
-                extra_words.insert(0, word)
-            else:
-                break
-            if len(extra_words) >= 4:
-                break
+    # Search line by line for better context
+    for line in text.splitlines():
+        line_lower = line.lower()
+        idx = line_lower.find(short_lower)
+        while idx >= 0:
+            before = line[:idx].rstrip()
+            if before:
+                # Grab preceding capitalized words + connectors
+                extra_words: list[str] = []
+                skipped = 0
+                for word in reversed(before.split()):
+                    if not word:
+                        continue
+                    if (word[0].isupper() and
+                            re.match(r"^[A-ZÀ-Ü][a-zà-ü]+$", word)):
+                        extra_words.insert(0, word)
+                        skipped = 0  # reset skip counter
+                    elif word.lower() in _NAME_CONNECTORS:
+                        extra_words.insert(0, word)
+                    else:
+                        # Allow skipping 1 non-name word (punctuation, etc.)
+                        # but stop after 2 consecutive non-name words
+                        skipped += 1
+                        if skipped >= 1:
+                            break
+                    if len(extra_words) >= 4:
+                        break
 
-        if extra_words:
-            # Build the longer name from source text (preserving case)
-            prefix_text = " ".join(extra_words)
-            full_name = f"{prefix_text} {text[idx:idx + len(short_name)]}"
-            # Validate: must be 3-6 words, mostly capitalized
-            words = full_name.split()
-            cap_words = [w for w in words if w[0].isupper() or w.lower() in _NAME_CONNECTORS]
-            if 3 <= len(words) <= 6 and len(cap_words) >= len(words) - 1:
-                return full_name
+                if extra_words:
+                    prefix = " ".join(extra_words)
+                    full_name = f"{prefix} {line[idx:idx + len(short_name)]}"
+                    words = full_name.split()
+                    cap_words = [w for w in words
+                                 if w[0].isupper() or w.lower() in _NAME_CONNECTORS]
+                    if 3 <= len(words) <= 6 and len(cap_words) >= len(words) - 1:
+                        return full_name
 
-        idx = text_lower.find(short_lower, idx + 1)
+            idx = line_lower.find(short_lower, idx + 1)
 
     return None
 
