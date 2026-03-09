@@ -725,62 +725,82 @@ def _web_search_all(name: str, context: str = "") -> str:
 
 
 # Words that indicate the search found the WRONG person
-_WRONG_PERSON_INDICATORS = {
-    "sacerdote", "padre", "bispo", "cardeal", "papa",
-    "cantor", "cantora", "músico", "música", "banda", "álbum", "disco",
-    "ator", "atriz", "filme", "novela", "telenovela", "série",
-    "jogador", "jogadora", "futebol", "seleção", "gol", "campeonato",
-    "classificando", "quartas de final", "semifinal", "final",
-    "enfrentar", "boca juniors", "libertadores", "copa do mundo",
-    "imperador", "rei", "rainha", "príncipe", "princesa",
-    "santo", "santa", "beato", "beata", "mártir",
-    "compositor", "cineasta",
-    "prefeito", "prefeita", "governador", "governadora",
-    "vereador", "vereadora", "deputado", "deputada",
-}
+def _snippet_mentions_person(snippet: str, name: str) -> bool:
+    """Check if a snippet actually references the person by name.
 
-# Words that confirm the person matches legal/arbitration context
-_RIGHT_PERSON_INDICATORS = {
-    "advogado", "advogada", "árbitro", "árbitra", "arbitragem",
-    "direito", "jurídico", "jurídica", "juiz", "juíza",
-    "mediador", "mediadora", "mediação",
-    "procurador", "procuradora", "promotor", "promotora",
-    "tribunal", "vara", "câmara", "oab", "escritório",
-    "contrato", "litígio", "disputa", "cláusula",
-    "professor", "professora", "mestre", "doutor", "doutora",
-    "consultor", "consultora", "gestor", "gestora",
-    "engenheiro", "engenheira", "empresário", "empresária",
-    "especialista", "perito", "perita",
-}
+    Requires at least the surname (last capitalized word) to appear.
+    """
+    text_lower = snippet.lower()
+    parts = name.split()
+    # Get the significant name parts (skip connectors like "de", "da")
+    significant = [p for p in parts if p.lower() not in _NAME_CONNECTORS and len(p) > 2]
+
+    if not significant:
+        return False
+
+    # Surname = last significant part (excluding suffixes like "Junior")
+    surnames = [p for p in significant if p.lower() not in _NAME_SUFFIXES]
+    if not surnames:
+        surnames = significant
+
+    # Accept if surname appears in snippet
+    surname = surnames[-1].lower()
+    if surname in text_lower:
+        return True
+
+    # Accept if first name + any other part appear
+    first = significant[0].lower()
+    if first in text_lower and any(p.lower() in text_lower for p in significant[1:]):
+        return True
+
+    return False
+
+
+def _snippet_has_bio_content(snippet: str) -> bool:
+    """Check if snippet contains any professional/biographical information.
+
+    Generic check — looks for role keywords, professional verbs, or
+    institutional mentions rather than random text.
+    """
+    text_lower = snippet.lower()
+
+    # Check for any role keyword from _ROLE_KEYWORDS
+    if _ROLE_PATTERN.search(snippet):
+        return True
+
+    # Check for bio-like verbs/phrases
+    bio_signals = [
+        "experiência", "atuação", "atua ", "atua como", "trabalha ",
+        "formado", "formada", "graduado", "graduada",
+        "especialista", "especializado", "especializada",
+        "membro ", "sócio", "sócia", "fundador", "fundadora",
+        "linkedin", "lattes", "currículo",
+        "escritório", "empresa", "instituto", "universidade", "faculdade",
+        "autor ", "autora ", "co-autor", "coordenador", "coordenadora",
+    ]
+    return any(signal in text_lower for signal in bio_signals)
 
 
 def _snippet_matches_context(snippet: str, name: str, context: str) -> bool:
-    """Check if a search snippet actually describes the right person.
+    """Validate that a search snippet is relevant to the person.
 
-    Rejects results that clearly describe a different person (e.g.,
-    a historical military figure instead of a lawyer) and YouTube UI junk.
+    Generic approach:
+    1. Reject YouTube UI garbage
+    2. Require the person's name (at least surname) to be mentioned
+    3. Require some bio-relevant content (role, profession, institution)
     """
-    text_lower = snippet.lower()
-    context_lower = context.lower()
-
     # Reject YouTube UI garbage
     if _is_youtube_ui_junk(snippet):
         return False
 
-    # Check for wrong-person indicators
-    wrong_count = sum(1 for w in _WRONG_PERSON_INDICATORS if w in text_lower)
-    right_count = sum(1 for w in _RIGHT_PERSON_INDICATORS if w in text_lower)
-
-    # Also check if channel name context words appear
-    context_words = set(context_lower.split())
-    context_match = any(w in text_lower for w in context_words if len(w) > 3)
-
-    # If snippet has wrong indicators and NO right indicators → reject
-    if wrong_count > 0 and right_count == 0 and not context_match:
+    # Snippet must mention the person (at least surname)
+    if not _snippet_mentions_person(snippet, name):
+        logger.debug("Snippet for '%s' rejected: name not mentioned", name)
         return False
 
-    # If snippet has more wrong than right indicators → reject
-    if wrong_count > right_count and not context_match:
+    # Snippet must have some bio-relevant content
+    if not _snippet_has_bio_content(snippet):
+        logger.debug("Snippet for '%s' rejected: no bio content", name)
         return False
 
     return True
@@ -1201,7 +1221,7 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
         # "profissional com sólida/ampla/larga experiência/atuação"
         r"profissional\s+com\s+[^.]{5,80}",
         # "é advogado/árbitro/etc"
-        r"é\s+(?:um(?:a)?\s+)?(?:" + role_alts + r")[a-zà-ü]*(?:\s+[^.]{3,60})?",
+        r"é\s+(?:um(?:a)?\s+)?(?:" + role_alts + r")[a-zà-ü]*(?:\s+[^.]{3,100})?",
         # "Role com/e experiência em..."
         r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:com|e)\s+(?:experiência|atuação|especialização)[^.]{3,60}",
         # "é um(a) profissional"
@@ -1229,16 +1249,36 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
             if len(bio.split()) >= 2 and not _is_youtube_ui_junk(bio):
                 return bio
 
-    # Fallback: take the first clean sentence-like chunk
+    # Fallback: take the first clean sentence that has bio-relevant content.
+    # Only accept sentences that contain a role keyword or bio signal —
+    # never accept random text like football results or YouTube CTAs.
     sentences = re.split(r"[.!?]", snippet)
+    best: str = ""
+    best_score: int = -1
     for s in sentences:
         s = _clean_bio_text(s.strip())
+        words = s.split()
+        if not (3 <= len(words) <= 15):
+            continue
         if _is_youtube_ui_junk(s):
             continue
-        if 3 <= len(s.split()) <= 15:
-            words = s.split()[:max_words]
-            result = " ".join(words)
-            if not _is_youtube_ui_junk(result):
-                return result
+        s_lower = s.lower()
+        score = 0
+        # Must have at least one bio signal to be accepted
+        if _ROLE_PATTERN.search(s):
+            score += 3
+        for signal in ["experiência", "atuação", "atua", "especialista",
+                        "profissional", "formado", "formada", "graduado",
+                        "membro", "sócio", "sócia", "fundador", "fundadora",
+                        "escritório", "universidade", "instituto"]:
+            if signal in s_lower:
+                score += 2
+        if score > best_score:
+            best_score = score
+            best = " ".join(words[:max_words])
+
+    # Only return if we found something with at least 1 bio signal
+    if best_score >= 2:
+        return best
 
     return ""
