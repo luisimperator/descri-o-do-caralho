@@ -170,50 +170,82 @@ def extract_role_from_description(name: str, description: str) -> tuple[str, str
       - "João Manoel (Advogado)"
       - "João Manoel | Advogado"
 
+    Uses full name, first name, and surname for matching.
     Returns (role, bio) or ("", "") if nothing found.
     """
     if not description or not name:
         return "", ""
 
-    first_name = name.split()[0]
-    last_name = name.split()[-1] if len(name.split()) > 1 else ""
+    parts = name.split()
+    first_name = parts[0]
+    # Get significant surname (skip connectors like "de", "da" and suffixes)
+    significant = [p for p in parts if p.lower() not in _NAME_CONNECTORS and len(p) > 2]
+    surnames = [p for p in significant[1:] if p.lower() not in _NAME_SUFFIXES]
+    last_name = surnames[-1] if surnames else (significant[-1] if len(significant) > 1 else "")
+
     name_esc = re.escape(name)
     first_esc = re.escape(first_name)
+    last_esc = re.escape(last_name) if last_name else ""
 
     # Build role alternatives
     role_alts = "|".join(re.escape(r) for r in _ROLE_KEYWORDS)
     role_re = r"(?:" + role_alts + r")[a-zà-ü]*"
 
-    patterns = [
+    # Optional suffix pattern (Junior, Filho, Neto, etc.)
+    suffix_alts = "|".join(re.escape(s) for s in _NAME_SUFFIXES)
+    suffix_opt = r"(?:\s+(?:" + suffix_alts + r"))?"
+
+    # Build name variants to try: full name, first+last, surname(+suffix), first name
+    name_variants = [name_esc]
+    if last_name and first_name != last_name:
+        # "First ... Last" with anything between
+        name_variants.append(first_esc + r"[^.\n]{0,30}" + last_esc + suffix_opt)
+        # "Surname (+ optional suffix like Junior)"
+        name_variants.append(re.escape(last_name) + suffix_opt)
+    name_variants.append(first_esc)
+
+    patterns_templates = [
         # "Name, Role context" / "Name - Role context" / "Name | Role"
-        name_esc + r"\s*[,\-–—\|:]\s*(" + role_re + r"(?:\s+[^.\n,]{2,40})?)",
+        r"{name}\s*[,\-–—\|:]\s*({role}(?:\s+[^.\n,]{{2,40}})?)",
         # "Name (Role context)"
-        name_esc + r"\s*\(\s*(" + role_re + r"[^)]{0,40})\)",
+        r"{name}\s*\(\s*({role}[^)]{{0,40}})\)",
         # "Role Name" (e.g. "Advogado João Manoel")
-        r"(" + role_re + r")\s+" + name_esc,
-        # "Role em/de/... Name" (e.g. "especialista em mediação Ana Rocha")
-        r"(" + role_re + r"(?:\s+(?:em|de|do|da|no|na|dos|das|para)\s+[a-zà-üA-ZÀ-Ü]+){0,3})\s+" + name_esc,
-        # First name variants: "João, Advogado"
-        first_esc + r"\s*[,\-–—\|:]\s*(" + role_re + r"(?:\s+[^.\n,]{2,30})?)",
-        # "Role FirstName"
-        r"(" + role_re + r")\s+" + first_esc,
-        # "Role em/de/... FirstName"
-        r"(" + role_re + r"(?:\s+(?:em|de|do|da|no|na|dos|das|para)\s+[a-zà-üA-ZÀ-Ü]+){0,3})\s+" + first_esc,
+        r"({role})\s+{name}",
+        # "Role em/de/... Name"
+        r"({role}(?:\s+(?:em|de|do|da|no|na|dos|das|para)\s+[a-zà-üA-ZÀ-Ü]+){{0,3}})\s+{name}",
     ]
 
-    for pat in patterns:
-        m = re.search(pat, description, re.IGNORECASE)
-        if m:
-            match_text = m.group(1).strip()
-            role = _extract_role(match_text) or match_text.split()[0].capitalize()
-            bio = match_text if len(match_text.split()) > 1 else ""
-            words = bio.split()[:12]
-            bio = " ".join(words) if words else ""
-            logger.info("Role from description for '%s': role=%s, bio=%s",
-                        name, role, bio)
-            return role, bio
+    for name_var in name_variants:
+        for tmpl in patterns_templates:
+            pat = tmpl.format(name=name_var, role=role_re)
+            m = re.search(pat, description, re.IGNORECASE)
+            if m:
+                match_text = m.group(1).strip()
+                role = _extract_role(match_text) or match_text.split()[0].capitalize()
+                bio = match_text if len(match_text.split()) > 1 else ""
+                words = bio.split()[:12]
+                bio = " ".join(words) if words else ""
+                # Don't end bio on articles/prepositions
+                bio = re.sub(r"\s+(?:e|em|de|do|da|na|no|com|para|a|o|as|os|que|um|uma)\s*$", "", bio)
+                logger.info("Role from description for '%s': role=%s, bio=%s",
+                            name, role, bio)
+                return role, bio
 
     return "", ""
+
+
+def _clean_role_output(role: str) -> str:
+    """Clean a role string: remove country names, OAB references, trailing junk."""
+    if not role:
+        return role
+    # Remove country names (BRASIL, BRAZIL, PORTUGAL, etc.)
+    role = re.sub(r",?\s*\b(?:BRASIL|BRAZIL|PORTUGAL|ARGENTINA|CHILE|URUGUAI|PARAGUAI|COLOMBIA|COLÔMBIA|PERU|MÉXICO|MEXICO)\b", "", role, flags=re.IGNORECASE)
+    # Remove OAB/CRM/CREA registrations like "(OAB-SP)", "(OAB/RJ 12345)"
+    role = re.sub(r"\s*\(?\b(?:OAB|CRM|CREA|CRC|COREN)[-/]?\s*[A-Z]{2}\b[^)]*\)?", "", role, flags=re.IGNORECASE)
+    # Clean trailing junk
+    role = re.sub(r"[\s,\-–—:;|]+$", "", role)
+    role = re.sub(r"^[\s,\-–—:;|]+", "", role)
+    return role.strip()
 
 
 def generate_mini_bio(
@@ -236,6 +268,9 @@ def generate_mini_bio(
         bio = _summarise_snippet(snippet, max_words=12)
         if position or bio:
             role = position or _extract_role(snippet) or "Participante"
+            role = _clean_role_output(role)
+            if not role:
+                role = "Participante"
             # Avoid duplicating position in bio
             if bio and role and _texts_overlap(bio, role):
                 bio = _summarise_snippet_excluding(snippet, role, max_words=12)
@@ -246,6 +281,9 @@ def generate_mini_bio(
     if description:
         role, bio = extract_role_from_description(name, description)
         if role:
+            role = _clean_role_output(role)
+            if not role:
+                role = "Participante"
             return role, bio
 
     return "Participante", ""
@@ -1215,26 +1253,27 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
     # Build role alternatives from the keywords list
     role_alts = "|".join(re.escape(r) for r in _ROLE_KEYWORDS)
 
+    # Use [^.]+ to capture until end of sentence; word-truncation (max_words) handles length
     bio_patterns = [
         # "Sou um(a) profissional com..." (LinkedIn about)
-        r"[Ss]ou\s+(?:um(?:a)?\s+)?(?:profissional|" + role_alts + r")[a-zà-ü]*\s+(?:com|de|que)[^.]{5,80}",
+        r"[Ss]ou\s+(?:um(?:a)?\s+)?(?:profissional|" + role_alts + r")[a-zà-ü]*\s+(?:com|de|que)[^.]+",
         # "profissional com sólida/ampla/larga experiência/atuação"
-        r"profissional\s+com\s+[^.]{5,80}",
+        r"profissional\s+com\s+[^.]+",
         # "é advogado/árbitro/etc"
-        r"é\s+(?:um(?:a)?\s+)?(?:" + role_alts + r")[a-zà-ü]*(?:\s+[^.]{3,100})?",
+        r"é\s+(?:um(?:a)?\s+)?(?:" + role_alts + r")[a-zà-ü]*(?:\s+[^.]+)?",
         # "Role com/e experiência em..."
-        r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:com|e)\s+(?:experiência|atuação|especialização)[^.]{3,60}",
+        r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:com|e)\s+(?:experiência|atuação|especialização)[^.]+",
         # "é um(a) profissional"
-        r"é\s+(?:um(?:a)?)\s+([^.]{10,80})",
+        r"é\s+(?:um(?:a)?)\s+([^.]+)",
         # "atua como advogado" / "atua na área de"
-        r"atua(?:ndo)?\s+(?:como|na|no|em)[^.]{5,60}",
+        r"atua(?:ndo)?\s+(?:como|na|no|em)[^.]+",
         # "especialista em / especializado em"
-        r"especialista\s+em\s+[^.]{5,60}",
-        r"especializado(?:a)?\s+em\s+[^.]{5,60}",
+        r"especialista\s+em\s+[^.]+",
+        r"especializado(?:a)?\s+em\s+[^.]+",
         # "experiência em/na/no"
-        r"experiência\s+(?:em|na|no|de)[^.]{5,60}",
+        r"experiência\s+(?:em|na|no|de)[^.]+",
         # Role keyword followed by context
-        r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:e\s+)?(?:especialista|especializado)?[^.]{3,60}",
+        r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:e\s+)?(?:especialista|especializado)?[^.]+",
     ]
     for pat in bio_patterns:
         m = re.search(pat, snippet, re.IGNORECASE)
