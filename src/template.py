@@ -60,8 +60,11 @@ def render_description(
         lines.append("\U0001f464 Participantes")
         for p in present:
             role_part = p.role if p.role else "Participante"
-            bio_part = p.mini_bio or "Participante do programa"
-            lines.append(f"{p.canonical}, {role_part}, {bio_part}")
+            bio_part = p.mini_bio if p.mini_bio and p.mini_bio != "Participante do programa" else ""
+            if bio_part:
+                lines.append(f"{p.canonical} - {role_part} - {bio_part}")
+            else:
+                lines.append(f"{p.canonical} - {role_part}")
         lines.append("")
 
     # --- Palavras-chave ---

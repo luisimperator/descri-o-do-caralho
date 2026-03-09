@@ -215,33 +215,34 @@ def generate_mini_bio(
     channel_name: str,
     description: str = "",
 ) -> tuple[str, str]:
-    """Create an 8-12 word mini-biography via web search.
+    """Create participant info: cargo/empresa + mini bio.
 
-    Tries multiple sources in order:
-      1. Google Custom Search API (if configured)
-      2. Wikipedia PT API (free, no key needed)
-      3. DuckDuckGo Instant Answer API (free, no key needed)
-      4. DuckDuckGo HTML scraping (fallback)
-      5. Video description parsing (offline)
+    Returns (role, bio) where:
+      - role = "Cargo, Empresa" (e.g. "Sócio, FGBS Advocacia")
+      - bio = mini description (e.g. "Advogada com experiência em compliance")
 
-    Returns (role, bio). Falls back to defaults on failure.
+    Falls back to defaults on failure.
     """
     # Use cached unified search (same call used by canonise)
     snippet = _web_search_all(name, channel_name)
     if snippet:
-        role = _extract_role(snippet)
+        position = _extract_position_company(snippet, name)
         bio = _summarise_snippet(snippet, max_words=12)
-        if role or bio:
-            logger.info("Web bio for '%s': role=%s, bio=%s", name, role, bio[:50])
-            return role, bio or "Participante do programa"
+        if position or bio:
+            role = position or _extract_role(snippet) or "Participante"
+            # Avoid duplicating position in bio
+            if bio and role and _texts_overlap(bio, role):
+                bio = _summarise_snippet_excluding(snippet, role, max_words=12)
+            logger.info("Web bio for '%s': role=%s, bio=%s", name, role, bio[:50] if bio else "")
+            return role, bio
 
     # Fallback: extract from video description (offline, no network)
     if description:
         role, bio = extract_role_from_description(name, description)
         if role:
-            return role, bio or "Participante do programa"
+            return role, bio
 
-    return "", "Participante do programa"
+    return "Participante", ""
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +312,87 @@ _ROLE_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(r) for r in _ROLE_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
+
+
+def _extract_position_company(snippet: str, name: str) -> str:
+    """Extract position + company from search snippet.
+
+    Looks for LinkedIn-style patterns:
+      - "Fulano - Sócio na Empresa X"
+      - "Fulano | Consultora Jurídica at FGBS"
+      - "Title · Company Name"
+      - "Role em/na/no Empresa"
+      - "Sócio-fundador da Empresa X"
+
+    Returns e.g. "Consultora Jurídica, FGBS Advocacia" or "".
+    """
+    if not snippet:
+        return ""
+
+    first_name = name.split()[0] if name else ""
+    first_esc = re.escape(first_name) if first_name else ""
+
+    # LinkedIn title patterns from Google snippets
+    # e.g. "Fernanda Barjud, CCA IBGC, MCIArb - Consultora Jurídica"
+    # e.g. "Lima Junior | Advogado at Escritório X"
+    name_esc = re.escape(name)
+    linkedin_patterns = [
+        # "Name, Certs - Title" (LinkedIn: "Fernanda Barjud, CCA IBGC, MCIArb - Consultora Jurídica")
+        # Grab the part AFTER the last dash/pipe before period
+        name_esc + r"[^.\n]*?\s*[-–—]\s*([A-ZÀ-Ü][^.\n]{3,50})",
+        # "Name - Title" or "Name | Title" (stop at period or LinkedIn)
+        name_esc + r"\s*[-–—\|]\s*([^.\n]+?)(?:\.|$|\s*[·\|]\s*LinkedIn|\s*[-–—]\s*LinkedIn)",
+        # "Name · Company | LinkedIn" (Google snippet format)
+        name_esc + r"\s*·\s*([^.\n]+?)(?:\.|$|\s*[-–—]\s*LinkedIn)",
+        # FirstName ... - Title (stop at period)
+        first_esc + r"[^.\n]{0,40}?\s*[-–—]\s*([A-ZÀ-Ü][^.\n]{5,50})" if first_esc else None,
+    ]
+
+    for pat in linkedin_patterns:
+        if not pat:
+            continue
+        m = re.search(pat, snippet, re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            raw = _clean_bio_text(raw)
+            # Remove "LinkedIn" if it slipped through
+            raw = re.sub(r"\bLinkedIn\b", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"[\s,\-–—:;|]+$", "", raw)
+            # Normalize English prepositions to Portuguese
+            raw = re.sub(r"\bat\b", "no", raw, count=1)
+            # Limit to ~8 words max for a clean position title
+            words = raw.split()
+            if words and len(words) <= 10:
+                logger.info("LinkedIn position for '%s': %s", name, raw)
+                return raw
+            elif words:
+                truncated = " ".join(words[:8])
+                logger.info("LinkedIn position for '%s' (truncated): %s", name, truncated)
+                return truncated
+
+    # Patterns: "role na/no/da/do Company" or "role, Company"
+    role_alts = "|".join(re.escape(r) for r in _ROLE_KEYWORDS)
+    company_patterns = [
+        # "Sócio na Empresa X" / "Advogada no Escritório Y"
+        r"(?:" + role_alts + r")[a-zà-ü]*(?:\s*[-–—]\s*|\s+)(?:na|no|da|do|em|at)\s+([A-ZÀ-Ü][^\n,.]{2,40})",
+        # "Sócio, Empresa X"
+        r"(?:" + role_alts + r")[a-zà-ü]*\s*,\s*([A-ZÀ-Ü][^\n,.]{2,40})",
+        # "Sócio-fundador(a) da Empresa"
+        r"(?:" + role_alts + r")[a-zà-ü]*(?:-[a-zà-ü]+)?\s+(?:da|do|de|na|no)\s+([A-ZÀ-Ü][^\n,.]{2,40})",
+    ]
+
+    for pat in company_patterns:
+        m = re.search(pat, snippet, re.IGNORECASE)
+        if m:
+            company = _clean_bio_text(m.group(1).strip())
+            role = _extract_role(snippet)
+            if role and company:
+                result = f"{role}, {company}"
+                logger.info("Position+company for '%s': %s", name, result)
+                return result
+
+    # Fallback: just the role keyword
+    return ""
 
 
 def _extract_role(text: str) -> str:
@@ -413,10 +495,12 @@ def _web_search_all(name: str, context: str = "") -> str:
 
     snippet = ""
 
-    # 1. Google Custom Search (needs key) — use enriched query
-    snippet = _search_google_api(query_with_context)
+    # 1. Google Custom Search — prioritize LinkedIn results
+    snippet = _search_google_api(f"{name} linkedin {context_terms}")
+    if not snippet:
+        snippet = _search_google_api(query_with_context)
 
-    # 2. Wikipedia PT (free, reliable) — use enriched query
+    # 2. Wikipedia PT (free, reliable)
     if not snippet:
         snippet = _search_wikipedia(f"{name} {context_terms}")
 
@@ -777,6 +861,58 @@ def _search_duckduckgo(query: str) -> str:
 
 
 
+def _texts_overlap(a: str, b: str) -> bool:
+    """Check if two texts significantly overlap (>50% of words in common)."""
+    words_a = set(a.lower().split())
+    words_b = set(b.lower().split())
+    if not words_a or not words_b:
+        return False
+    common = words_a & words_b
+    smaller = min(len(words_a), len(words_b))
+    return len(common) / smaller > 0.5
+
+
+def _summarise_snippet_excluding(snippet: str, exclude: str, max_words: int = 12) -> str:
+    """Extract bio from snippet, skipping text that overlaps with 'exclude'.
+
+    Used to avoid duplicating the position/company in the bio.
+    Prefers descriptive sentences with verbs/adjectives over name/title fragments.
+    """
+    # Split into sentences
+    sentences = re.split(r"[.!?]", snippet)
+
+    # Score and pick the best descriptive sentence
+    best = ""
+    best_score = -1
+    for s in sentences:
+        s = _clean_bio_text(s.strip())
+        words = s.split()
+        if len(words) < 3 or len(words) > 20:
+            continue
+        # Skip if it overlaps with exclude text
+        if _texts_overlap(s, exclude):
+            continue
+        # Score: prefer sentences with descriptive words
+        score = 0
+        s_lower = s.lower()
+        for indicator in ["experiência", "atuação", "especialista", "atua",
+                          "profissional", "formado", "formada", "graduado",
+                          "membro", "sólida", "ampla", "larga"]:
+            if indicator in s_lower:
+                score += 2
+        # Prefer sentences that contain role keywords
+        if _ROLE_PATTERN.search(s):
+            score += 1
+        # Penalize sentences that look like names/titles
+        if re.match(r"^[A-ZÀ-Ü][a-zà-ü]+ [A-ZÀ-Ü]", s):
+            score -= 2
+        if score > best_score:
+            best_score = score
+            best = " ".join(words[:max_words])
+
+    return best
+
+
 def _clean_bio_text(text: str) -> str:
     """Clean garbage from bio text: emojis, @handles, URLs, years, etc."""
     # Remove emojis (Unicode emoji ranges)
@@ -792,8 +928,9 @@ def _clean_bio_text(text: str) -> str:
     # Remove standalone years like (1991) or "1834–1923"
     text = re.sub(r"\(\d{4}\)", "", text)
     text = re.sub(r"\b\d{4}\s*[–—-]\s*\d{4}\b", "", text)
-    # Remove ALL_CAPS words that are likely acronyms/noise (except known ones)
-    text = re.sub(r"\b[A-Z]{4,}\b", "", text)
+    # Remove ALL_CAPS noise words (but keep company names/certifications)
+    # Only remove if they look like random noise, not acronyms
+    # Keep: FGBS, IBGC, CCA, MCIArb, OAB, etc.
     # Remove hashtags
     text = re.sub(r"#\w+", "", text)
     # Collapse whitespace
@@ -810,17 +947,23 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
     role_alts = "|".join(re.escape(r) for r in _ROLE_KEYWORDS)
 
     bio_patterns = [
+        # "Sou um(a) profissional com..." (LinkedIn about)
+        r"[Ss]ou\s+(?:um(?:a)?\s+)?(?:profissional|" + role_alts + r")[a-zà-ü]*\s+(?:com|de|que)[^.]{5,80}",
+        # "profissional com sólida/ampla/larga experiência/atuação"
+        r"profissional\s+com\s+[^.]{5,80}",
         # "é advogado/árbitro/etc"
         r"é\s+(?:um(?:a)?\s+)?(?:" + role_alts + r")[a-zà-ü]*(?:\s+[^.]{3,60})?",
+        # "Role com/e experiência em..."
+        r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:com|e)\s+(?:experiência|atuação|especialização)[^.]{3,60}",
         # "é um(a) profissional"
         r"é\s+(?:um(?:a)?)\s+([^.]{10,80})",
-        # "atua como advogado"
-        r"atua(?:ndo)?\s+(?:como|na|no|em)\s+[^.]{5,60}",
-        # "conhecido(a) como/por"
-        r"conhecido(?:a)?\s+(?:como|por)\s+([^.]{10,80})",
+        # "atua como advogado" / "atua na área de"
+        r"atua(?:ndo)?\s+(?:como|na|no|em)[^.]{5,60}",
         # "especialista em / especializado em"
         r"especialista\s+em\s+[^.]{5,60}",
         r"especializado(?:a)?\s+em\s+[^.]{5,60}",
+        # "experiência em/na/no"
+        r"experiência\s+(?:em|na|no|de)[^.]{5,60}",
         # Role keyword followed by context
         r"(?:" + role_alts + r")[a-zà-ü]*\s+(?:e\s+)?(?:especialista|especializado)?[^.]{3,60}",
     ]
@@ -830,6 +973,8 @@ def _summarise_snippet(snippet: str, max_words: int = 12) -> str:
             text = _clean_bio_text(m.group(0).strip())
             words = text.split()[:max_words]
             bio = " ".join(words)
+            # Don't end on articles/prepositions
+            bio = re.sub(r"\s+(?:e|em|de|do|da|na|no|com|para|a|o|as|os|que|um|uma)\s*$", "", bio)
             if len(bio.split()) >= 2:
                 return bio
 
