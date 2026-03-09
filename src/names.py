@@ -62,6 +62,7 @@ def collect_name_candidates(
     """Gather potential person names from all available sources.
 
     A name must be 2-5 capitalised words. Duplicates are merged.
+    Handles Brazilian composite names (e.g. "João Manoel Lima Junior").
     Filters out channel name and common non-person words.
     """
     candidates: list[str] = list(ocr_names)
@@ -79,6 +80,11 @@ def collect_name_candidates(
 
     # Deduplicate (approximate: lowercase match)
     candidates = _deduplicate(candidates)
+
+    # Merge split names: "João Manoel" + "Lima Junior" → "João Manoel Lima Junior"
+    # Check all source texts for the combined form
+    all_texts = "\n".join([title, description, "\n".join(ocr_names), transcript])
+    candidates = _merge_split_names(candidates, all_texts)
 
     # Filter out non-person names
     candidates = _filter_non_names(candidates, channel_name)
@@ -441,6 +447,127 @@ def _filter_non_names(candidates: list[str], channel_name: str) -> list[str]:
         result.append(name)
 
     return result
+
+
+# Brazilian name suffixes that should NOT be standalone names
+_NAME_SUFFIXES = {"junior", "jr", "filho", "neto", "segundo", "terceiro",
+                  "sobrinho", "bisneto"}
+
+# Brazilian name connectors (lowercase words within names)
+# NOTE: "e" is NOT a connector — it means "and" and separates different people
+_NAME_CONNECTORS = {"de", "da", "do", "das", "dos"}
+
+
+def _merge_split_names(candidates: list[str], source_text: str) -> list[str]:
+    """Merge name fragments that are parts of a composite Brazilian name.
+
+    E.g. ["João Manoel", "Lima Junior"] → ["João Manoel Lima Junior"]
+    if "João Manoel Lima Junior" appears in any source text.
+
+    Also handles:
+    - Suffix merging: "Lima Junior" alone → try to find full name
+    - Substring absorption: if "João Manoel" is part of "João Manoel Lima Junior"
+    """
+    if len(candidates) < 2:
+        return candidates
+
+    source_lower = source_text.lower()
+    merged: list[str] = []
+    absorbed: set[int] = set()  # indices of candidates absorbed into another
+
+    for i, name_a in enumerate(candidates):
+        if i in absorbed:
+            continue
+
+        best = name_a
+
+        for j, name_b in enumerate(candidates):
+            if j <= i or j in absorbed:
+                continue
+
+            # Try combining in both orders
+            for combo in [f"{name_a} {name_b}", f"{name_b} {name_a}"]:
+                combo_lower = combo.lower()
+                # Check if the combined name exists in any source
+                if combo_lower in source_lower:
+                    # Pick the version from the source text for correct casing
+                    idx = source_lower.index(combo_lower)
+                    best = source_text[idx:idx + len(combo)]
+                    absorbed.add(j)
+                    logger.info("Merged names: '%s' + '%s' → '%s'", name_a, name_b, best)
+                    break
+
+            # Also try with connectors: "João Manoel de Lima Junior"
+            if j not in absorbed:
+                for conn in _NAME_CONNECTORS:
+                    for combo in [f"{name_a} {conn} {name_b}", f"{name_b} {conn} {name_a}"]:
+                        combo_lower = combo.lower()
+                        if combo_lower in source_lower:
+                            idx = source_lower.index(combo_lower)
+                            best = source_text[idx:idx + len(combo)]
+                            absorbed.add(j)
+                            logger.info("Merged names with connector: '%s' + '%s' → '%s'",
+                                        name_a, name_b, best)
+                            break
+                    if j in absorbed:
+                        break
+
+        # Check if a standalone suffix-name should be absorbed
+        last_word = best.split()[-1].lower()
+        if last_word in _NAME_SUFFIXES and len(best.split()) <= 2:
+            # This looks like just a suffix fragment (e.g. "Lima Junior")
+            # Try to find it as part of a longer name in source text
+            longer = _find_longer_name_in_text(best, source_text)
+            if longer and longer.lower() != best.lower():
+                best = longer
+                logger.info("Extended suffix name: '%s' → '%s'", name_a, best)
+
+        merged.append(best)
+
+    # Deduplicate again after merging
+    return _deduplicate(merged)
+
+
+def _find_longer_name_in_text(short_name: str, text: str) -> str | None:
+    """Find a longer version of a name in source text.
+
+    E.g. given "Lima Junior", finds "João Manoel Lima Junior" in the text.
+    """
+    short_lower = short_name.lower()
+    text_lower = text.lower()
+
+    # Find all occurrences of the short name
+    idx = text_lower.find(short_lower)
+    while idx >= 0:
+        # Look backwards for more capitalized words
+        start = idx
+        before = text[:start].rstrip()
+        # Grab preceding capitalized words (and connectors like "de", "da")
+        extra_words: list[str] = []
+        for word in reversed(before.split()):
+            if (word and word[0].isupper() and
+                    re.match(r"^[A-ZÀ-Ü][a-zà-ü]+$", word)):
+                extra_words.insert(0, word)
+            elif word.lower() in _NAME_CONNECTORS:
+                extra_words.insert(0, word)
+            else:
+                break
+            if len(extra_words) >= 4:
+                break
+
+        if extra_words:
+            # Build the longer name from source text (preserving case)
+            prefix_text = " ".join(extra_words)
+            full_name = f"{prefix_text} {text[idx:idx + len(short_name)]}"
+            # Validate: must be 3-6 words, mostly capitalized
+            words = full_name.split()
+            cap_words = [w for w in words if w[0].isupper() or w.lower() in _NAME_CONNECTORS]
+            if 3 <= len(words) <= 6 and len(cap_words) >= len(words) - 1:
+                return full_name
+
+        idx = text_lower.find(short_lower, idx + 1)
+
+    return None
 
 
 def _extract_capitalised_sequences(text: str) -> list[str]:
