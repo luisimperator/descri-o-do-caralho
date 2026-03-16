@@ -824,24 +824,28 @@ def _snippet_matches_context(snippet: str, name: str, context: str) -> bool:
 
     Generic approach:
     1. Reject YouTube UI garbage
-    2. Require the person's name (at least surname) to be mentioned
-    3. Require some bio-relevant content (role, profession, institution)
+    2. If snippet has bio-relevant content (role keywords, professional
+       signals) → accept.  The search already used the person's name as
+       query, so professional results are very likely about them.
+    3. If NO bio content: accept only if the person's name/surname
+       actually appears in the snippet text.
+    4. Otherwise reject (random text with no professional signals and
+       no name mention = garbage).
     """
     # Reject YouTube UI garbage
     if _is_youtube_ui_junk(snippet):
         return False
 
-    # Snippet must mention the person (at least surname)
-    if not _snippet_mentions_person(snippet, name):
-        logger.debug("Snippet for '%s' rejected: name not mentioned", name)
-        return False
+    # If snippet has professional/bio content → trust the search query
+    if _snippet_has_bio_content(snippet):
+        return True
 
-    # Snippet must have some bio-relevant content
-    if not _snippet_has_bio_content(snippet):
-        logger.debug("Snippet for '%s' rejected: no bio content", name)
-        return False
+    # No bio content — only accept if the person's name appears
+    if _snippet_mentions_person(snippet, name):
+        return True
 
-    return True
+    logger.debug("Snippet for '%s' rejected: no bio content and name not mentioned", name)
+    return False
 
 
 def _build_search_context(channel_name: str) -> str:
