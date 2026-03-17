@@ -41,14 +41,34 @@ class ValidatedName:
 
 # Words that look like capitalised sequences but aren't person names
 _NON_NAME_WORDS = {
+    # Roles / labels
     "entrevistador", "entrevistadora", "palestrante", "apresentador",
     "apresentadora", "participante", "convidado", "convidada",
     "mediador", "mediadora", "moderador", "moderadora", "ouvinte",
+    # Video / channel terms
     "gestao", "gestão", "arbitragem", "podcast", "episódio", "episodio",
     "canal", "inscreva", "compartilhe", "youtube", "instagram",
     "twitter", "facebook", "whatsapp", "telegram", "linkedin",
     "introdução", "introducao", "conclusão", "conclusao",
     "parte", "capitulo", "capítulo", "resumo", "destaque",
+    # Common Portuguese nouns/adjectives often capitalised in titles
+    "análise", "analise", "econômica", "economica", "econômico", "economico",
+    "direito", "direitos", "aplicada", "aplicado", "aplicação",
+    "vozes", "debate", "debates", "entrevista", "conversa", "conversas",
+    "especial", "internacional", "nacional", "federal", "estadual",
+    "pública", "publica", "público", "publico",
+    "jurídica", "juridica", "jurídico", "juridico",
+    "comercial", "comerciais", "civil", "penal", "criminal",
+    "trabalhista", "tributário", "tributario", "tributária", "tributaria",
+    "constitucional", "ambiental", "digital", "processual",
+    "contratual", "societário", "societario", "regulatório", "regulatorio",
+    "reforma", "revisão", "revisao", "atualização", "atualizacao",
+    "perspectivas", "tendências", "tendencias", "desafios", "impactos",
+    "seminário", "seminario", "congresso", "conferência", "conferencia",
+    "simpósio", "simposio", "workshop", "palestra", "aula",
+    "projeto", "projetos", "programa", "programas", "edição", "edicao",
+    "série", "serie", "temporada", "live", "lives",
+    "mesa", "redonda", "painel",
 }
 
 
@@ -209,6 +229,8 @@ def extract_role_from_description(name: str, description: str) -> tuple[str, str
         r"{name}\s*[,\-–—\|:]\s*({role}(?:\s+[^.\n,]{{2,40}})?)",
         # "Name (Role context)"
         r"{name}\s*\(\s*({role}[^)]{{0,40}})\)",
+        # "Name que é / é Role" (spoken: "Fernanda que é professora")
+        r"{name}\s+(?:que\s+é|é)\s+({role}(?:\s+[^.\n,]{{2,40}})?)",
         # "Role Name" (e.g. "Advogado João Manoel")
         r"({role})\s+{name}",
         # "Role em/de/... Name"
@@ -252,6 +274,7 @@ def generate_mini_bio(
     name: str,
     channel_name: str,
     description: str = "",
+    transcript: str = "",
 ) -> tuple[str, str]:
     """Create participant info: cargo/empresa + mini bio.
 
@@ -260,6 +283,7 @@ def generate_mini_bio(
       - bio = mini description (e.g. "Advogada com experiência em compliance")
 
     Falls back to defaults on failure.
+    Search order: web search → video description → transcript.
     """
     # Use cached unified search (same call used by canonise)
     snippet = _web_search_all(name, channel_name)
@@ -277,9 +301,18 @@ def generate_mini_bio(
             logger.info("Web bio for '%s': role=%s, bio=%s", name, role, bio[:50] if bio else "")
             return role, bio
 
-    # Fallback: extract from video description (offline, no network)
+    # Fallback 1: extract from video description (offline, no network)
     if description:
         role, bio = extract_role_from_description(name, description)
+        if role:
+            role = _clean_role_output(role)
+            if not role:
+                role = "Participante"
+            return role, bio
+
+    # Fallback 2: extract from transcript (spoken introductions)
+    if transcript:
+        role, bio = extract_role_from_description(name, transcript)
         if role:
             role = _clean_role_output(role)
             if not role:
